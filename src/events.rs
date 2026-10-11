@@ -20,6 +20,7 @@ use napi_derive::napi;
 use tokio::sync::mpsc;
 
 use crate::RUNTIME;
+use crate::lifecycle::{LIFECYCLE_TOPIC, Lifecycle};
 
 /// One event delivered to JavaScript.
 #[napi(object)]
@@ -36,6 +37,7 @@ pub(crate) struct Events {
     bridge: Arc<LinkEvents<ApplicationEventLayout>>,
     topics: Mutex<HashSet<String>>,
     name: String,
+    lifecycle: Arc<Lifecycle>,
     queue: mpsc::UnboundedSender<DeliveredEvent>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -46,6 +48,7 @@ impl Events {
         name: &str,
         link: &Arc<LinkSegment>,
         lane: usize,
+        lifecycle: Arc<Lifecycle>,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<DeliveredEvent>)> {
         let bus = Arc::new(
             FleetEventBus::<ApplicationEventLayout>::with_layout(fleet)
@@ -67,6 +70,7 @@ impl Events {
             bridge,
             topics: Mutex::new(HashSet::new()),
             name: name.to_owned(),
+            lifecycle,
             queue,
             tasks: Mutex::new(Vec::new()),
         });
@@ -177,6 +181,28 @@ impl Events {
         Ok(event.id().to_string())
     }
 
+    /// Spread a lifecycle decision to every instance of this application,
+    /// this one included.
+    pub(crate) fn publish_lifecycle(
+        &self,
+        action: &str,
+    ) -> Result<()> {
+        let Some(id) = self.lifecycle.id() else {
+            return Err(failure("this application has no valid identity"));
+        };
+        let event = ApplicationEvent::for_application(
+            id,
+            LIFECYCLE_TOPIC,
+            EventValue::String(action.as_bytes().to_vec()),
+        )
+        .map_err(failure)?;
+        self.bus
+            .publish(APPLICATION_EVENT_TOPIC, &event.encode_orbit())
+            .map_err(failure)?;
+        self.lifecycle.apply(action);
+        Ok(())
+    }
+
     /// Hand a decoded event to JavaScript if this process subscribed to its
     /// topic and it is addressed to everyone or to this application.
     fn deliver(
@@ -184,6 +210,15 @@ impl Events {
         payload: &[u8],
     ) {
         let Ok(event) = ApplicationEvent::decode_orbit(payload) else { return };
+        if event.topic().as_str() == LIFECYCLE_TOPIC {
+            let ours = event.target().is_some_and(|target| {
+                target.runtime().as_str() == RUNTIME && target.name().as_str() == self.name
+            });
+            if ours && let EventValue::String(action) = event.payload() {
+                self.lifecycle.apply(&String::from_utf8_lossy(action));
+            }
+            return;
+        }
         if !self.topics.lock().expect("event topics").contains(event.topic().as_str()) {
             return;
         }

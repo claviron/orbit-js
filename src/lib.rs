@@ -12,11 +12,12 @@ use std::sync::{Arc, Mutex};
 
 mod cells;
 mod events;
+mod lifecycle;
 
 use claviron::orbit::transport::{
-    Exchange as ExchangeFrame, ExchangeReply, FrameKind, Received,
-    TRANSPORT_FLEET_CAPACITY, Ticket, TransportBodies, TransportSegment,
-    frame_kind,
+    ControlCommand, Exchange as ExchangeFrame, ExchangeReply, FrameKind,
+    Received, ShutdownNotice, TRANSPORT_FLEET_CAPACITY, Ticket,
+    TransportBodies, TransportSegment, frame_kind,
 };
 use claviron::orbitive::{Fleet, NodeId};
 use claviron::orbitive::link::InboxReceiver;
@@ -58,6 +59,9 @@ pub struct Link {
     /// close ends that wait at once instead of waiting for a frame.
     closed: tokio::sync::watch::Sender<bool>,
     events: Arc<events::Events>,
+    lifecycle: Arc<lifecycle::Lifecycle>,
+    controls: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<lifecycle::ControlEvent>>,
+    name: String,
     cells: Option<cells::Cells>,
     cells_unavailable: Option<String>,
     delivered: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<events::DeliveredEvent>>,
@@ -95,11 +99,14 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
             Ok(cells) => (Some(cells), None),
             Err(error) => (None, Some(error.reason.clone())),
         };
+    let (lifecycle, controls) =
+        lifecycle::Lifecycle::new(Arc::clone(&segment), &options.name, node);
     let (events, delivered) = events::Events::join(
         fleet,
         &options.name,
         segment.link(),
         joined.lane,
+        Arc::clone(&lifecycle),
     )?;
     Ok(Link {
         segment,
@@ -109,6 +116,9 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
         receiver: tokio::sync::Mutex::new(Some(receiver)),
         closed: tokio::sync::watch::channel(false).0,
         events,
+        lifecycle,
+        controls: tokio::sync::Mutex::new(controls),
+        name: options.name.clone(),
         cells,
         cells_unavailable,
         delivered: tokio::sync::Mutex::new(delivered),
@@ -150,16 +160,35 @@ impl Link {
                 // them keeps the lane flowing.
                 Received::Directory(_) => continue,
             }
-            if !matches!(frame_kind(&frame), Ok(FrameKind::Request)) {
-                continue;
+            match frame_kind(&frame) {
+                Ok(FrameKind::Request) => {}
+                Ok(FrameKind::Control) => {
+                    if let Ok(command) = ControlCommand::decode(&frame) {
+                        self.control(command);
+                    }
+                    continue;
+                }
+                Ok(FrameKind::ShutdownInitiated) => {
+                    if let Ok(notice) = ShutdownNotice::decode(&frame) {
+                        self.lifecycle.edge_shutdown(notice.edge);
+                    }
+                    continue;
+                }
+                _ => continue,
             }
             let Ok(exchange) = ExchangeFrame::decode(&frame) else {
                 continue;
             };
+            if !self.lifecycle.running() {
+                // The application is stopped; the process and its lane are
+                // not. Answer without running the handler.
+                self.refuse(exchange, 503).await;
+                continue;
+            }
             if exchange.upgrade {
                 // WebSocket upgrades are not served yet: refuse rather than
                 // leave the edge waiting.
-                self.refuse(&exchange, 501);
+                self.refuse(exchange, 501).await;
                 continue;
             }
             return Exchange::new(
@@ -245,22 +274,62 @@ impl Link {
         }
     }
 
-    fn refuse(
+    /// The next thing the edge said — a lifecycle change, a named command or
+    /// an edge shutdown — or `null` once the link is closed.
+    #[napi]
+    pub async fn next_control(&self) -> Option<lifecycle::ControlEvent> {
+        let mut closed = self.closed.subscribe();
+        if *closed.borrow_and_update() {
+            return None;
+        }
+        let mut controls = self.controls.lock().await;
+        tokio::select! {
+            event = controls.recv() => event,
+            _ = closed.changed() => None,
+        }
+    }
+
+    /// Whether the application is running (not stopped by the edge).
+    #[napi(getter)]
+    pub fn running(&self) -> bool {
+        self.lifecycle.running()
+    }
+
+    fn control(
         &self,
-        exchange: &ExchangeFrame,
+        command: ControlCommand,
+    ) {
+        if command.application != self.name {
+            return;
+        }
+        match command.name.as_str() {
+            "status" if command.target.is_none() => self.lifecycle.publish_state(),
+            "start" | "stop" | "restart" => {
+                let ours = command.target.as_ref().is_some_and(|target| {
+                    target.runtime == RUNTIME && target.name == self.name
+                });
+                if ours
+                    && let Err(error) =
+                        self.events.publish_lifecycle(&command.name)
+                {
+                    eprintln!("orbit-js: lifecycle command could not spread: {error}");
+                }
+            }
+            _ => self.lifecycle.command(command.name, command.payload),
+        }
+    }
+
+    /// Answer without the handler: the status, and an empty body the edge
+    /// sees end, so nothing waits on a reply that will not come.
+    async fn refuse(
+        &self,
+        exchange: ExchangeFrame,
         status: u16,
     ) {
-        let reply = ExchangeReply {
-            correlation: exchange.correlation,
-            status,
-            headers: Vec::new(),
-            body: exchange.body,
-        };
-        if let Ok(frame) = reply.encode() {
-            let _ = self
-                .segment
-                .inbox()
-                .write(exchange.origin as usize, &frame);
+        if let Ok(refused) =
+            Exchange::new(exchange, Arc::clone(&self.segment), &self.bodies)
+        {
+            refused.refuse(status).await;
         }
     }
 }
@@ -279,6 +348,9 @@ pub struct Exchange {
     incoming: tokio::sync::Mutex<Option<ReadHalf>>,
     outgoing: tokio::sync::Mutex<Option<WriteHalf>>,
     replied: Mutex<bool>,
+    /// Set by `abort`, so a read or write waiting on the edge gives up its
+    /// half instead of holding it while the exchange is abandoned.
+    aborted: tokio::sync::watch::Sender<bool>,
 }
 
 impl Exchange {
@@ -318,7 +390,26 @@ impl Exchange {
             incoming: tokio::sync::Mutex::new(incoming),
             outgoing: tokio::sync::Mutex::new(outgoing),
             replied: Mutex::new(false),
+            aborted: tokio::sync::watch::Sender::new(false),
         })
+    }
+}
+
+impl Exchange {
+    /// Reply `status` with an empty, finished body, unless a reply head went
+    /// out already. Returns whether this was the reply.
+    async fn refuse(
+        &self,
+        status: u16,
+    ) -> bool {
+        self.incoming.lock().await.take();
+        if self.respond(status, Vec::new()).is_err() {
+            return false;
+        }
+        if let Some(mut outgoing) = self.outgoing.lock().await.take() {
+            let _ = outgoing.shutdown().await;
+        }
+        true
     }
 }
 
@@ -353,8 +444,15 @@ impl Exchange {
         let Some(incoming) = held.as_mut() else {
             return Ok(None);
         };
+        let mut aborted = self.aborted.subscribe();
+        if *aborted.borrow_and_update() {
+            return Err(abandoned());
+        }
         let mut piece = vec![0u8; READ_CHUNK];
-        let read = incoming.read(&mut piece).await.map_err(failure)?;
+        let read = tokio::select! {
+            read = incoming.read(&mut piece) => read.map_err(failure)?,
+            _ = aborted.changed() => return Err(abandoned()),
+        };
         if read == 0 {
             held.take();
             return Ok(None);
@@ -411,7 +509,14 @@ impl Exchange {
                 "this exchange has no body slot to write to",
             ));
         };
-        outgoing.write_all(&chunk).await.map_err(failure)
+        let mut aborted = self.aborted.subscribe();
+        if *aborted.borrow_and_update() {
+            return Err(abandoned());
+        }
+        tokio::select! {
+            written = outgoing.write_all(&chunk) => written.map_err(failure),
+            _ = aborted.changed() => Err(abandoned()),
+        }
     }
 
     /// Close the reply body; the edge sees its end.
@@ -423,13 +528,22 @@ impl Exchange {
         Ok(())
     }
 
-    /// Abandon the reply body: the edge sees it cut, not finished.
+    /// Abandon the exchange. Before a reply head the edge gets a 503 with an
+    /// empty body; after it, the body is cut, so the edge sees it unfinished.
+    /// Either way nothing on the edge is left waiting for this process.
     #[napi]
     pub async fn abort(&self) {
-        if let Some(mut outgoing) = self.outgoing.lock().await.take() {
+        self.aborted.send_replace(true);
+        if !self.refuse(503).await
+            && let Some(mut outgoing) = self.outgoing.lock().await.take()
+        {
             outgoing.reset();
         }
     }
+}
+
+fn abandoned() -> Error {
+    Error::new(Status::Cancelled, "this exchange was abandoned")
 }
 
 /// The request's absolute URL, as a `Request` needs one: scheme, the host the

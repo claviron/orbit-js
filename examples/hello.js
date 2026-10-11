@@ -2,18 +2,42 @@
 // node examples/hello.js <fleet> <name>
 // bun examples/hello.js <fleet> <name>
 import process from "node:process";
-import { serve } from "../index.js";
+import { join } from "../index.js";
 
 const [fleet = "apps", name = "hello-js"] = process.argv.slice(2);
 console.log(`serving '${name}' in fleet '${fleet}'`);
 
 // Ctrl-C releases the lane before the process exits.
-const stop = new AbortController();
-process.on("SIGINT", () => stop.abort());
-process.on("SIGTERM", () => stop.abort());
+const link = await join({ fleet, name });
+process.on("SIGINT", () => link.close());
+process.on("SIGTERM", () => link.close());
 
-await serve({ fleet, name, signal: stop.signal }, async (request) => {
+// The edge stops, starts and restarts the application; the process stays.
+link.onLifecycle((action) => console.log(`lifecycle: ${action}`));
+link.onCommand("ping", (payload) => console.log(`ping: ${new TextDecoder().decode(payload)}`));
+
+await link.serve(async (request) => {
   const url = new URL(request.url);
+  // /hang: never answers on its own; a stop or restart cancels it.
+  if (url.pathname === "/hang") {
+    return new Promise((_, reject) => {
+      request.signal.addEventListener("abort", () => {
+        console.log(`/hang cancelled: ${request.signal.reason.message}`);
+        reject(request.signal.reason);
+      });
+    });
+  }
+  // /open: a reply that sends one line and stays open until it is cancelled.
+  if (url.pathname === "/open") {
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("open\n"));
+      },
+      cancel(reason) {
+        console.log(`/open cancelled: ${reason.message}`);
+      },
+    }));
+  }
   // /bytes/<n>: a reply body of n bytes, streamed in pieces.
   const size = url.pathname.match(/^\/bytes\/(\d+)$/);
   if (size) {

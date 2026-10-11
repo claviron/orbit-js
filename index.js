@@ -25,6 +25,11 @@ export class Link {
   #native;
   #listeners = new Map();
   #pumping = false;
+  #controlling = false;
+  #lifecycle = new Set();
+  #commands = new Map();
+  #shutdown = new Set();
+  #generation = new AbortController();
 
   constructor(link) {
     this.#native = link;
@@ -42,13 +47,77 @@ export class Link {
    * @param {(request: Request) => Response | Promise<Response>} handler
    */
   async serve(handler) {
+    this.#control();
     for (;;) {
       const exchange = await this.#native.next();
       if (exchange === null) {
         return;
       }
-      answer(exchange, handler);
+      answer(exchange, handler, this.#generation.signal);
     }
+  }
+
+  /**
+   * Whether the application is running. The edge stops, starts and restarts
+   * the application, not this process: while stopped, the lane stays and
+   * requests are answered 503 without reaching the handler.
+   */
+  get running() {
+    return this.#native.running;
+  }
+
+  /**
+   * Aborts when the edge stops or restarts the application. Each request's
+   * own `request.signal` follows it, so work a request started is cancelled
+   * and its reply abandoned rather than left open. Work the application keeps
+   * outside requests can follow this one.
+   */
+  get signal() {
+    return this.#generation.signal;
+  }
+
+  /**
+   * Call `listener` with `"start"`, `"stop"` or `"restart"` after the edge
+   * changed the application. On stop and restart, `signal` has already
+   * aborted; a restart is the moment to rebuild what the application holds.
+   *
+   * @param {(action: "start" | "stop" | "restart") => void} listener
+   */
+  onLifecycle(listener) {
+    this.#lifecycle.add(listener);
+    this.#control();
+    return this;
+  }
+
+  /**
+   * Call `listener` for each command named `name` the edge forwards to this
+   * application, with its payload bytes.
+   *
+   * @param {string} name
+   * @param {(payload: Uint8Array) => void} listener
+   */
+  onCommand(name, listener) {
+    let listeners = this.#commands.get(name);
+    if (!listeners) {
+      listeners = new Set();
+      this.#commands.set(name, listeners);
+    }
+    listeners.add(listener);
+    this.#control();
+    return this;
+  }
+
+  /**
+   * Call `listener` when the edge in front of this application announces it
+   * is shutting down. The Link stays; what to do about it is the
+   * application's decision.
+   *
+   * @param {(edge: string) => void} listener
+   */
+  onShutdown(listener) {
+    this.#shutdown.add(listener);
+    this.#control();
+    return this;
   }
 
   /**
@@ -108,6 +177,40 @@ export class Link {
     return this.#native.close();
   }
 
+  async #control() {
+    if (this.#controlling) {
+      return;
+    }
+    this.#controlling = true;
+    for (;;) {
+      const control = await this.#native.nextControl();
+      if (control === null) {
+        return;
+      }
+      switch (control.kind) {
+        case "lifecycle":
+          if (control.action === "stop" || control.action === "restart") {
+            this.#generation.abort(
+              new DOMException(`application ${control.action}`, "AbortError"),
+            );
+            this.#generation = new AbortController();
+          }
+          notify(this.#lifecycle, control.action, `lifecycle '${control.action}'`);
+          break;
+        case "command":
+          notify(
+            this.#commands.get(control.name) ?? [],
+            new Uint8Array(control.payload ?? []),
+            `command '${control.name}'`,
+          );
+          break;
+        case "shutdown":
+          notify(this.#shutdown, control.edge, "edge shutdown");
+          break;
+      }
+    }
+  }
+
   async #pump() {
     if (this.#pumping) {
       return;
@@ -149,31 +252,96 @@ export async function serve(options, handler) {
   await link.serve(handler);
 }
 
-async function answer(exchange, handler) {
-  let response;
-  try {
-    response = await handler(request(exchange));
-  } catch (error) {
-    console.error("orbit-js: handler failed", error);
-    response = new Response("Internal Server Error", { status: 500 });
-  }
-  try {
-    exchange.respond(response.status, [...response.headers]);
-    if (response.body) {
-      for await (const chunk of response.body) {
-        await exchange.write(chunk);
-      }
+function notify(listeners, value, what) {
+  for (const listener of listeners) {
+    try {
+      listener(value);
+    } catch (error) {
+      console.error(`orbit-js: listener for ${what} failed`, error);
     }
-    await exchange.end();
-  } catch (error) {
-    console.error("orbit-js: reply failed", error);
-    await exchange.abort();
   }
 }
 
-function request(exchange) {
+// Answer one exchange. `generation` aborts when the edge stops or restarts the
+// application: the request's signal follows it, a handler still running is
+// no longer waited for, and a body still streaming is cut — the edge, and the
+// client behind it, are never left holding an open reply.
+async function answer(exchange, handler, generation) {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const follow = () => controller.abort(generation.reason);
+  if (generation.aborted) {
+    follow();
+  } else {
+    generation.addEventListener("abort", follow, { once: true });
+  }
+  const stopped = new Promise((resolve) => {
+    signal.addEventListener("abort", resolve, { once: true });
+  });
+  const handled = Promise.resolve().then(() => handler(request(exchange, signal)));
+  // A handler outrun by the abort settles later; its result goes nowhere.
+  handled.then(
+    (late) => signal.aborted && late?.body?.cancel(signal.reason).catch(() => {}),
+    () => {},
+  );
+  try {
+    let response;
+    try {
+      response = await Promise.race([handled, stopped]);
+    } catch (error) {
+      if (!signal.aborted) {
+        console.error("orbit-js: handler failed", error);
+        response = new Response("Internal Server Error", { status: 500 });
+      }
+    }
+    if (signal.aborted) {
+      await exchange.abort();
+      return;
+    }
+    await reply(exchange, response, signal);
+  } finally {
+    generation.removeEventListener("abort", follow);
+  }
+}
+
+async function reply(exchange, response, signal) {
+  const reader = response.body?.getReader();
+  // A write may be parked on a slow client; aborting the exchange frees it.
+  const cancel = () => {
+    reader?.cancel(signal.reason).catch(() => {});
+    exchange.abort();
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    exchange.respond(response.status, [...response.headers]);
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        await exchange.write(value);
+      }
+    }
+    if (signal.aborted) {
+      await exchange.abort();
+    } else {
+      await exchange.end();
+    }
+  } catch (error) {
+    if (!signal.aborted) {
+      console.error("orbit-js: reply failed", error);
+    }
+    reader?.cancel(error).catch(() => {});
+    await exchange.abort();
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+function request(exchange, signal) {
   const method = exchange.method;
-  const init = { method, headers: exchange.headers };
+  const init = { method, headers: exchange.headers, signal };
   if (exchange.hasBody && method !== "GET" && method !== "HEAD") {
     init.body = new ReadableStream({
       async pull(controller) {
