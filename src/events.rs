@@ -2,12 +2,6 @@
 //! Rust applications publish, shared with the other instances of this
 //! application through the fleet's event ring and with the edge's fleet across
 //! the Link.
-//!
-//! This process's lane index is its node in the fleet: a lane is held by one
-//! live process, so the index is unique while it lives, which is what the
-//! Link's "forwarded once, at its origin" rule needs. A fleet shared with a
-//! supervised Claviron runner would number its nodes differently; an orbit-js
-//! application keeps a fleet of its own.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -16,11 +10,11 @@ use claviron::app::{
     APPLICATION_EVENT_TOPIC, ApplicationEvent, ApplicationId,
     ApplicationName, ApplicationRuntime, EventValue, link_routing_key,
 };
-use claviron::orbit::transport::{EDGE_RUNTIME, TRANSPORT_FLEET_CAPACITY};
+use claviron::orbit::transport::EDGE_RUNTIME;
 use claviron::orbit::{ApplicationEventLayout, FleetEventCodec};
 use claviron::orbitive::events::FleetEventBus;
 use claviron::orbitive::link::{LinkEvents, LinkSegment, Routing};
-use claviron::orbitive::{Fleet, NodeId};
+use claviron::orbitive::Fleet;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use tokio::sync::mpsc;
@@ -48,19 +42,11 @@ pub(crate) struct Events {
 
 impl Events {
     pub(crate) fn join(
-        fleet_name: &str,
+        fleet: Arc<Fleet>,
         name: &str,
         link: &Arc<LinkSegment>,
         lane: usize,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<DeliveredEvent>)> {
-        let node = u16::try_from(lane)
-            .map_err(|_| failure("the lane does not fit a fleet node"))?;
-        let capacity = u16::try_from(TRANSPORT_FLEET_CAPACITY)
-            .map_err(|_| failure("the fleet capacity does not fit u16"))?;
-        let fleet = Arc::new(
-            Fleet::join_shm_as(fleet_name, capacity, NodeId::new(node))
-                .map_err(failure)?,
-        );
         let bus = Arc::new(
             FleetEventBus::<ApplicationEventLayout>::with_layout(fleet)
                 .map_err(failure)?,

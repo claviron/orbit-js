@@ -10,12 +10,15 @@
 
 use std::sync::{Arc, Mutex};
 
+mod cells;
 mod events;
 
 use claviron::orbit::transport::{
-    Exchange as ExchangeFrame, ExchangeReply, FrameKind, Received, Ticket,
-    TransportBodies, TransportSegment, frame_kind,
+    Exchange as ExchangeFrame, ExchangeReply, FrameKind, Received,
+    TRANSPORT_FLEET_CAPACITY, Ticket, TransportBodies, TransportSegment,
+    frame_kind,
 };
+use claviron::orbitive::{Fleet, NodeId};
 use claviron::orbitive::link::InboxReceiver;
 use claviron::orbitive::shm::LaneHold;
 use claviron::orbitive::stream::{ReadHalf, WriteHalf};
@@ -55,6 +58,8 @@ pub struct Link {
     /// close ends that wait at once instead of waiting for a frame.
     closed: tokio::sync::watch::Sender<bool>,
     events: Arc<events::Events>,
+    cells: Option<cells::Cells>,
+    cells_unavailable: Option<String>,
     delivered: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<events::DeliveredEvent>>,
 }
 
@@ -72,8 +77,26 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
     );
     bodies.reclaimed(&joined.reclaimed);
     let receiver = segment.receiver(joined.lane).map_err(failure)?;
+    // This process's lane index is its node in the fleet: a lane is held by
+    // one live process, so the index is unique while it lives — what the
+    // Link's "forwarded once, at its origin" rule and per-node rings need. A
+    // fleet shared with a supervised Claviron runner would number its nodes
+    // differently; an orbit-js application keeps a fleet of its own.
+    let node = u16::try_from(joined.lane)
+        .map_err(|_| failure("the lane does not fit a fleet node"))?;
+    let capacity = u16::try_from(TRANSPORT_FLEET_CAPACITY)
+        .map_err(|_| failure("the fleet capacity does not fit u16"))?;
+    let fleet = Arc::new(
+        Fleet::join_shm_as(&options.fleet, capacity, NodeId::new(node))
+            .map_err(failure)?,
+    );
+    let (cells, cells_unavailable) =
+        match cells::Cells::attach(Arc::clone(&fleet)) {
+            Ok(cells) => (Some(cells), None),
+            Err(error) => (None, Some(error.reason.clone())),
+        };
     let (events, delivered) = events::Events::join(
-        &options.fleet,
+        fleet,
         &options.name,
         segment.link(),
         joined.lane,
@@ -86,6 +109,8 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
         receiver: tokio::sync::Mutex::new(Some(receiver)),
         closed: tokio::sync::watch::channel(false).0,
         events,
+        cells,
+        cells_unavailable,
         delivered: tokio::sync::Mutex::new(delivered),
     })
 }
@@ -155,6 +180,20 @@ impl Link {
         self.receiver.lock().await.take();
         let _ = self.segment.inbox().release_lane(self.lane as usize);
         drop(self.hold.lock().expect("lane hold").take());
+    }
+
+    /// The fleet's cells, shared with every instance of this application.
+    #[napi(getter)]
+    pub fn cells(&self) -> Result<cells::Cells> {
+        self.cells.clone().ok_or_else(|| {
+            Error::new(
+                Status::GenericFailure,
+                format!(
+                    "Orbit cells are not available: {}",
+                    self.cells_unavailable.as_deref().unwrap_or("unknown")
+                ),
+            )
+        })
     }
 
     /// Receive events on these topics, from the other instances of this

@@ -93,6 +93,16 @@ export class Link {
     return this.#native.publish(topic, payload ?? null, target);
   }
 
+  /**
+   * The fleet's Orbit cells, shared with every instance of this application:
+   * `cells.int(0)`, `float`, `bool`, `string`, or `cells.open(id)`. A cell
+   * offers `get`, `set`, atomic `add` / `append`, `version` and
+   * `await wait(since)`, woken by the write itself.
+   */
+  get cells() {
+    return this.#native.cells;
+  }
+
   /** Stop being a target and stop taking events; the lane is released. */
   close() {
     return this.#native.close();

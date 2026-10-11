@@ -1,0 +1,228 @@
+//! Orbit cells: typed values in the fleet's shared memory, the same cells
+//! Claviron's PHP `Orbital` reads. Every instance of this application that
+//! opens an id reads and updates the same value; additions and appends are
+//! atomic, and a waiter is woken by the write itself.
+
+use std::sync::Arc;
+
+use claviron::orbitive::Fleet;
+use claviron::orbitive::cell::{
+    CellId, Cells as FleetCells, Orbital, Text, TextId,
+};
+use napi::bindgen_prelude::Either4;
+use napi::{Error, Result, Status};
+use napi_derive::napi;
+
+#[derive(Clone)]
+enum Value {
+    Int(Orbital<i64>),
+    Float(Orbital<f64>),
+    Bool(Orbital<bool>),
+    Text(Text),
+}
+
+/// What a cell holds, as JavaScript sees it.
+type Loaded = Either4<i64, f64, bool, String>;
+
+/// The fleet's cell table, opened once per process.
+#[napi]
+#[derive(Clone)]
+pub struct Cells {
+    cells: Arc<FleetCells>,
+}
+
+impl Cells {
+    pub(crate) fn attach(fleet: Arc<Fleet>) -> Result<Self> {
+        Ok(Self { cells: Arc::new(FleetCells::new(fleet).map_err(failure)?) })
+    }
+}
+
+#[napi]
+impl Cells {
+    #[napi]
+    pub fn int(&self, value: Option<i64>) -> Result<Cell> {
+        let cell = self.cells.allocate(value.unwrap_or(0)).map_err(failure)?;
+        Ok(Cell { value: Value::Int(cell) })
+    }
+
+    #[napi]
+    pub fn float(&self, value: Option<f64>) -> Result<Cell> {
+        let cell = self.cells.allocate(value.unwrap_or(0.0)).map_err(failure)?;
+        Ok(Cell { value: Value::Float(cell) })
+    }
+
+    #[napi]
+    pub fn bool(&self, value: Option<bool>) -> Result<Cell> {
+        let cell =
+            self.cells.allocate(value.unwrap_or(false)).map_err(failure)?;
+        Ok(Cell { value: Value::Bool(cell) })
+    }
+
+    #[napi]
+    pub fn string(&self, value: Option<String>) -> Result<Cell> {
+        let cell = self
+            .cells
+            .allocate_text(value.as_deref().unwrap_or(""))
+            .map_err(failure)?;
+        Ok(Cell { value: Value::Text(cell) })
+    }
+
+    /// Attach to a cell another process made, by the id it printed. A scalar
+    /// id does not say its type; the cell does.
+    #[napi]
+    pub fn open(&self, id: String) -> Result<Cell> {
+        if id.starts_with("cell:") {
+            let cell_id: CellId = id.parse().map_err(failure)?;
+            let value = self
+                .cells
+                .open::<i64>(cell_id)
+                .map(Value::Int)
+                .or_else(|_| self.cells.open::<f64>(cell_id).map(Value::Float))
+                .or_else(|_| self.cells.open::<bool>(cell_id).map(Value::Bool))
+                .map_err(failure)?;
+            return Ok(Cell { value });
+        }
+        let text_id: TextId = id.parse().map_err(failure)?;
+        let text = self.cells.open_text(text_id).map_err(failure)?;
+        Ok(Cell { value: Value::Text(text) })
+    }
+}
+
+/// A handle to one cell. The value lives in shared memory, not here.
+#[napi]
+pub struct Cell {
+    value: Value,
+}
+
+#[napi]
+impl Cell {
+    /// The id another process opens the same cell by.
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        match &self.value {
+            Value::Int(cell) => cell.id().to_string(),
+            Value::Float(cell) => cell.id().to_string(),
+            Value::Bool(cell) => cell.id().to_string(),
+            Value::Text(cell) => cell.id().to_string(),
+        }
+    }
+
+    /// `int`, `float`, `bool` or `string`.
+    #[napi(getter)]
+    pub fn kind(&self) -> String {
+        match &self.value {
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::Text(_) => "string",
+        }
+        .to_owned()
+    }
+
+    #[napi]
+    pub fn get(&self) -> Result<Loaded> {
+        Ok(match &self.value {
+            Value::Int(cell) => Either4::A(cell.load().map_err(failure)?),
+            Value::Float(cell) => Either4::B(cell.load().map_err(failure)?),
+            Value::Bool(cell) => Either4::C(cell.load().map_err(failure)?),
+            Value::Text(cell) => Either4::D(cell.load().map_err(failure)?),
+        })
+    }
+
+    #[napi]
+    pub fn set(&self, value: Loaded) -> Result<()> {
+        match (&self.value, value) {
+            (Value::Int(cell), Either4::A(value)) => cell.store(value),
+            (Value::Int(cell), Either4::B(value)) if value.fract() == 0.0 => {
+                cell.store(value as i64)
+            }
+            (Value::Float(cell), Either4::A(value)) => cell.store(value as f64),
+            (Value::Float(cell), Either4::B(value)) => cell.store(value),
+            (Value::Bool(cell), Either4::C(value)) => cell.store(value),
+            (Value::Text(cell), Either4::D(value)) => {
+                return cell.store(&value).map_err(failure);
+            }
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("a {} cell does not take that value", self.kind()),
+                ));
+            }
+        }
+        .map_err(failure)
+    }
+
+    /// Add atomically and return the value after; int and float cells.
+    #[napi]
+    pub fn add(&self, by: f64) -> Result<Loaded> {
+        match &self.value {
+            Value::Int(cell) if by.fract() == 0.0 => {
+                cell.fetch_add(by as i64).map(Either4::A).map_err(failure)
+            }
+            Value::Float(cell) => {
+                cell.fetch_add(by).map(Either4::B).map_err(failure)
+            }
+            _ => Err(Error::new(
+                Status::InvalidArg,
+                format!("a {} cell cannot add {by}", self.kind()),
+            )),
+        }
+    }
+
+    /// Append atomically and return the text after; string cells.
+    #[napi]
+    pub fn append(&self, text: String) -> Result<String> {
+        let Value::Text(cell) = &self.value else {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "only a string cell can be appended to",
+            ));
+        };
+        cell.append(&text).map_err(failure)?;
+        cell.load().map_err(failure)
+    }
+
+    /// The write count. Take it before `get()`, and `wait()` misses nothing.
+    #[napi]
+    pub fn version(&self) -> Result<u32> {
+        match &self.value {
+            Value::Int(cell) => cell.version(),
+            Value::Float(cell) => cell.version(),
+            Value::Bool(cell) => cell.version(),
+            Value::Text(cell) => cell.version(),
+        }
+        .map_err(failure)
+    }
+
+    /// Resolve once the cell has been written since `since`, by any process;
+    /// the write count then. Woken by the write, never by an interval.
+    #[napi]
+    pub async fn wait(&self, since: u32) -> Result<u32> {
+        let value = self.value.clone();
+        tokio::task::spawn_blocking(move || match value {
+            Value::Int(cell) => cell.wait_changed(since),
+            Value::Float(cell) => cell.wait_changed(since),
+            Value::Bool(cell) => cell.wait_changed(since),
+            Value::Text(cell) => cell.wait_changed(since),
+        })
+        .await
+        .map_err(failure)?
+        .map_err(failure)
+    }
+
+    /// Give the cell back; every handle to it goes stale.
+    #[napi]
+    pub fn release(&self) -> Result<()> {
+        match self.value.clone() {
+            Value::Int(cell) => cell.release(),
+            Value::Float(cell) => cell.release(),
+            Value::Bool(cell) => cell.release(),
+            Value::Text(cell) => cell.release(),
+        }
+        .map_err(failure)
+    }
+}
+
+fn failure(error: impl std::fmt::Display) -> Error {
+    Error::new(Status::GenericFailure, error.to_string())
+}
