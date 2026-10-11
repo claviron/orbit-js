@@ -14,13 +14,22 @@ const native = require("./orbit.node");
 export const join = native.join;
 
 /**
- * Serve `handler` on the Link until `link.close()`.
+ * Serve `handler` on the Link until `options.signal` aborts, then release the
+ * lane so the edge stops choosing it. Requests already taken still finish.
  *
- * @param {{ fleet: string, name: string }} options
+ * @param {{ fleet: string, name: string, signal?: AbortSignal }} options
  * @param {(request: Request) => Response | Promise<Response>} handler
  */
 export async function serve(options, handler) {
-  const link = await native.join(options);
+  const { signal, ...where } = options;
+  const link = await native.join(where);
+  if (signal) {
+    if (signal.aborted) {
+      await link.close();
+      return;
+    }
+    signal.addEventListener("abort", () => link.close(), { once: true });
+  }
   for (;;) {
     const exchange = await link.next();
     if (exchange === null) {

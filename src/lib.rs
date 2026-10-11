@@ -49,6 +49,9 @@ pub struct Link {
     lane: u32,
     hold: Mutex<Option<LaneHold>>,
     receiver: tokio::sync::Mutex<Option<InboxReceiver>>,
+    /// Set by `close()`. A `next()` parked on the lane watches it too, so a
+    /// close ends that wait at once instead of waiting for a frame.
+    closed: tokio::sync::watch::Sender<bool>,
 }
 
 /// Take a lane in `fleet` under `name` and start reading it.
@@ -71,6 +74,7 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
         lane: joined.lane as u32,
         hold: Mutex::new(Some(joined.hold)),
         receiver: tokio::sync::Mutex::new(Some(receiver)),
+        closed: tokio::sync::watch::channel(false).0,
     })
 }
 
@@ -85,13 +89,21 @@ impl Link {
     /// The next request, or `null` once the link is closed.
     #[napi]
     pub async fn next(&self) -> Result<Option<Exchange>> {
+        let mut closed = self.closed.subscribe();
+        if *closed.borrow_and_update() {
+            return Ok(None);
+        }
         let mut held = self.receiver.lock().await;
         let mut frame = Vec::new();
         loop {
             let Some(receiver) = held.as_mut() else {
                 return Ok(None);
             };
-            match receiver.next(&mut frame).await.map_err(failure)? {
+            let received = tokio::select! {
+                received = receiver.next(&mut frame) => received.map_err(failure)?,
+                _ = closed.changed() => return Ok(None),
+            };
+            match received {
                 Received::Frame => {}
                 // Directory changes and Link events come in later milestones;
                 // reading past them keeps the lane flowing.
@@ -122,6 +134,7 @@ impl Link {
     /// taken may still be answered.
     #[napi]
     pub async fn close(&self) {
+        self.closed.send_replace(true);
         self.receiver.lock().await.take();
         let _ = self.segment.inbox().release_lane(self.lane as usize);
         drop(self.hold.lock().expect("lane hold").take());

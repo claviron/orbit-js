@@ -14,5 +14,8 @@ case "$(uname -s)" in
     Darwin) library=liborbit_js.dylib ;;
     *) library=liborbit_js.so ;;
 esac
+# Replace, never overwrite in place: macOS kills a process that loads a
+# signed library whose file changed under the same inode.
+rm -f orbit.node
 cp "target/$mode/$library" orbit.node
 echo "orbit.node built ($mode)"

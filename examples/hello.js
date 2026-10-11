@@ -7,7 +7,12 @@ import { serve } from "../index.js";
 const [fleet = "apps", name = "hello-js"] = process.argv.slice(2);
 console.log(`serving '${name}' in fleet '${fleet}'`);
 
-await serve({ fleet, name }, async (request) => {
+// Ctrl-C releases the lane before the process exits.
+const stop = new AbortController();
+process.on("SIGINT", () => stop.abort());
+process.on("SIGTERM", () => stop.abort());
+
+await serve({ fleet, name, signal: stop.signal }, async (request) => {
   const url = new URL(request.url);
   const body = request.body ? await request.text() : "";
   return Response.json({
@@ -18,3 +23,4 @@ await serve({ fleet, name }, async (request) => {
     received: body.length,
   });
 });
+console.log(`released '${name}'`);
