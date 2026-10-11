@@ -68,7 +68,8 @@ export class Link {
 
   /**
    * Aborts when the edge stops or restarts the application. Each request's
-   * own `request.signal` follows it, so work a request started is cancelled
+   * own `request.signal` follows it — and aborts on its own when the edge ends
+   * the reply, as it does for an event stream when it shuts down — so work a request started is cancelled
    * and its reply abandoned rather than left open. Work the application keeps
    * outside requests can follow this one.
    */
@@ -298,13 +299,17 @@ async function answer(exchange, handler, generation) {
       await exchange.abort();
       return;
     }
-    await reply(exchange, response, signal);
+    await reply(exchange, response, controller);
   } finally {
     generation.removeEventListener("abort", follow);
   }
 }
 
-async function reply(exchange, response, signal) {
+// The edge ends its side of a reply on its own terms — the client left, or an
+// event stream at the edge's shutdown. A write that fails says so, and the
+// request's signal aborts: the handler hears it as a client that left.
+async function reply(exchange, response, controller) {
+  const signal = controller.signal;
   const reader = response.body?.getReader();
   // A write may be parked on a slow client; aborting the exchange frees it.
   const cancel = () => {
@@ -330,7 +335,7 @@ async function reply(exchange, response, signal) {
     }
   } catch (error) {
     if (!signal.aborted) {
-      console.error("orbit-js: reply failed", error);
+      controller.abort(new DOMException("the edge ended the reply", "AbortError"));
     }
     reader?.cancel(error).catch(() => {});
     await exchange.abort();
