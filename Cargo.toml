@@ -15,6 +15,9 @@ napi = { version = "3", default-features = false, features = ["napi8", "async", 
 napi-derive = "3"
 tokio = { version = "1", features = ["io-util", "sync", "rt", "macros"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+
 [build-dependencies]
 napi-build = "2"
 
