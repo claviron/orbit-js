@@ -10,6 +10,8 @@
 
 use std::sync::{Arc, Mutex};
 
+mod events;
+
 use claviron::orbit::transport::{
     Exchange as ExchangeFrame, ExchangeReply, FrameKind, Received, Ticket,
     TransportBodies, TransportSegment, frame_kind,
@@ -23,7 +25,7 @@ use napi_derive::napi;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// What a lane says serves its name, so the edge's directory reads `js`.
-const RUNTIME: &str = "js";
+pub(crate) const RUNTIME: &str = "js";
 
 /// A process's first life; a supervisor would count restarts, and there is
 /// none here.
@@ -52,6 +54,8 @@ pub struct Link {
     /// Set by `close()`. A `next()` parked on the lane watches it too, so a
     /// close ends that wait at once instead of waiting for a frame.
     closed: tokio::sync::watch::Sender<bool>,
+    events: Arc<events::Events>,
+    delivered: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<events::DeliveredEvent>>,
 }
 
 /// Take a lane in `fleet` under `name` and start reading it.
@@ -68,6 +72,12 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
     );
     bodies.reclaimed(&joined.reclaimed);
     let receiver = segment.receiver(joined.lane).map_err(failure)?;
+    let (events, delivered) = events::Events::join(
+        &options.fleet,
+        &options.name,
+        segment.link(),
+        joined.lane,
+    )?;
     Ok(Link {
         segment,
         bodies,
@@ -75,6 +85,8 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
         hold: Mutex::new(Some(joined.hold)),
         receiver: tokio::sync::Mutex::new(Some(receiver)),
         closed: tokio::sync::watch::channel(false).0,
+        events,
+        delivered: tokio::sync::Mutex::new(delivered),
     })
 }
 
@@ -105,9 +117,13 @@ impl Link {
             };
             match received {
                 Received::Frame => {}
-                // Directory changes and Link events come in later milestones;
-                // reading past them keeps the lane flowing.
-                Received::Directory(_) | Received::Event => continue,
+                Received::Event => {
+                    self.events.accept(&frame);
+                    continue;
+                }
+                // Directory changes come in a later milestone; reading past
+                // them keeps the lane flowing.
+                Received::Directory(_) => continue,
             }
             if !matches!(frame_kind(&frame), Ok(FrameKind::Request)) {
                 continue;
@@ -135,9 +151,59 @@ impl Link {
     #[napi]
     pub async fn close(&self) {
         self.closed.send_replace(true);
+        self.events.stop();
         self.receiver.lock().await.take();
         let _ = self.segment.inbox().release_lane(self.lane as usize);
         drop(self.hold.lock().expect("lane hold").take());
+    }
+
+    /// Receive events on these topics, from the other instances of this
+    /// application and from across the Link. Subscribing is what tells the
+    /// edge's side to send them.
+    #[napi]
+    pub fn subscribe(&self, topics: Vec<String>) {
+        self.events.subscribe(topics);
+    }
+
+    #[napi]
+    pub fn unsubscribe(&self, topics: Vec<String>) {
+        self.events.unsubscribe(topics);
+    }
+
+    /// Publish an application event; returns its id. With `target`
+    /// (`[runtime, name]`), only that application receives it.
+    #[napi]
+    pub fn publish(
+        &self,
+        topic: String,
+        payload: serde_json::Value,
+        target: Option<Vec<String>>,
+    ) -> Result<String> {
+        let target = match target.as_deref() {
+            None => None,
+            Some([runtime, name]) => Some((runtime.clone(), name.clone())),
+            Some(_) => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "target is [runtime, name]",
+                ));
+            }
+        };
+        self.events.publish(topic, &payload, target)
+    }
+
+    /// The next subscribed event, or `null` once the link is closed.
+    #[napi]
+    pub async fn next_event(&self) -> Option<events::DeliveredEvent> {
+        let mut closed = self.closed.subscribe();
+        if *closed.borrow_and_update() {
+            return None;
+        }
+        let mut delivered = self.delivered.lock().await;
+        tokio::select! {
+            event = delivered.recv() => event,
+            _ = closed.changed() => None,
+        }
     }
 
     fn refuse(

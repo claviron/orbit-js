@@ -530,12 +530,14 @@ dependencies = [
 name = "claviron"
 version = "0.2.0-alpha.16"
 dependencies = [
+ "claviron-app",
  "claviron-auth",
  "claviron-edge",
  "claviron-files",
  "claviron-helpers",
  "claviron-http",
  "claviron-orbit",
+ "claviron-runtime",
  "orbitive",
  "serde_json",
  "serde_yaml",
@@ -2281,6 +2283,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -2580,6 +2584,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
  "tokio",
 ]
 
