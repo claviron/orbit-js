@@ -1,0 +1,23 @@
+[package]
+name = "orbit-js"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Serve a Deno, Node or Bun application behind a Claviron edge over Orbit Link"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+claviron = { path = "../claviron", default-features = false, features = ["orbit"] }
+napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
+napi-derive = "3"
+tokio = { version = "1", features = ["io-util", "sync", "rt", "macros"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

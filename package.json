@@ -1,0 +1,16 @@
+{
+  "name": "@claviron/orbit",
+  "version": "0.1.0",
+  "description": "Serve a Deno, Node or Bun application behind a Claviron edge over Orbit Link",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": ["index.js", "orbit.node"],
+  "scripts": {
+    "build": "sh scripts/build.sh"
+  },
+  "license": "MIT",
+  "private": true
+}
