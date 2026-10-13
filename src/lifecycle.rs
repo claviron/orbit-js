@@ -20,7 +20,8 @@ use claviron::app::fleet::{
     FleetApplicationStatus, encode_link_snapshot_rows,
 };
 use claviron::app::{
-    ApplicationId, ApplicationLifecycle, ApplicationName, ApplicationRuntime,
+    ApplicationDescription, ApplicationId, ApplicationLifecycle,
+    ApplicationName, ApplicationRuntime,
 };
 use claviron::orbit::service::{FleetMember, FleetMemberRole};
 use claviron::orbit::transport::TransportSegment;
@@ -49,6 +50,7 @@ pub struct ControlEvent {
 }
 
 pub(crate) struct Lifecycle {
+    description: ApplicationDescription,
     segment: Arc<TransportSegment>,
     name: String,
     lane: u16,
@@ -62,10 +64,16 @@ impl Lifecycle {
         segment: Arc<TransportSegment>,
         name: &str,
         lane: u16,
+        framework: Option<String>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<ControlEvent>) {
         let (notify, receiver) = mpsc::unbounded_channel();
         (
             Arc::new(Self {
+                description: ApplicationDescription {
+                    framework,
+                    ..ApplicationDescription::new("javascript", "fetch")
+                        .runner("orbit-js")
+                },
                 segment,
                 name: name.to_owned(),
                 lane,
@@ -157,6 +165,7 @@ impl Lifecycle {
             applications: vec![FleetApplicationStatus {
                 id,
                 placements: vec![FleetApplicationPlacement {
+                    description: self.description.clone(),
                     member: FleetMember {
                         node_id: self.lane,
                         role: FleetMemberRole::Standalone,
@@ -175,18 +184,24 @@ impl Lifecycle {
                 }],
             }],
         };
-        let member =
-            FleetMember { node_id: self.lane, role: FleetMemberRole::Standalone };
+        let member = FleetMember {
+            node_id: self.lane,
+            role: FleetMemberRole::Standalone,
+        };
         match encode_link_snapshot_rows(&snapshot, member) {
             Ok(rows) => {
                 if let Err(error) =
                     self.segment.publish_application_state(&self.name, &rows)
                 {
-                    eprintln!("orbit-js: application state was not reported: {error}");
+                    eprintln!(
+                        "orbit-js: application state was not reported: {error}"
+                    );
                 }
             }
             Err(error) => {
-                eprintln!("orbit-js: application state could not be encoded: {error}")
+                eprintln!(
+                    "orbit-js: application state could not be encoded: {error}"
+                )
             }
         }
     }

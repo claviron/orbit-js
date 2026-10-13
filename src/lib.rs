@@ -19,10 +19,10 @@ use claviron::orbit::transport::{
     Received, ShutdownNotice, TRANSPORT_FLEET_CAPACITY, Ticket,
     TransportBodies, TransportSegment, frame_kind,
 };
-use claviron::orbitive::{Fleet, NodeId};
 use claviron::orbitive::link::InboxReceiver;
 use claviron::orbitive::shm::LaneHold;
 use claviron::orbitive::stream::{ReadHalf, WriteHalf};
+use claviron::orbitive::{Fleet, NodeId};
 use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
@@ -45,6 +45,8 @@ pub struct JoinOptions {
     pub fleet: String,
     /// The name this process serves in that fleet.
     pub name: String,
+    /// Application-declared framework, independent of the JavaScript engine.
+    pub framework: Option<String>,
 }
 
 /// This process's place in a Link fleet.
@@ -60,19 +62,22 @@ pub struct Link {
     closed: tokio::sync::watch::Sender<bool>,
     events: Arc<events::Events>,
     lifecycle: Arc<lifecycle::Lifecycle>,
-    controls: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<lifecycle::ControlEvent>>,
+    controls: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<lifecycle::ControlEvent>,
+    >,
     name: String,
     cells: Option<cells::Cells>,
     cells_unavailable: Option<String>,
-    delivered: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<events::DeliveredEvent>>,
+    delivered: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<events::DeliveredEvent>,
+    >,
 }
 
 /// Take a lane in `fleet` under `name` and start reading it.
 #[napi]
 pub async fn join(options: JoinOptions) -> Result<Link> {
-    let segment = Arc::new(
-        TransportSegment::for_fleet(&options.fleet).map_err(failure)?,
-    );
+    let segment =
+        Arc::new(TransportSegment::for_fleet(&options.fleet).map_err(failure)?);
     let joined =
         segment.join(&options.name, RUNTIME, INCARNATION).map_err(failure)?;
     let bodies = Arc::new(
@@ -99,8 +104,12 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
             Ok(cells) => (Some(cells), None),
             Err(error) => (None, Some(error.reason.clone())),
         };
-    let (lifecycle, controls) =
-        lifecycle::Lifecycle::new(Arc::clone(&segment), &options.name, node);
+    let (lifecycle, controls) = lifecycle::Lifecycle::new(
+        Arc::clone(&segment),
+        &options.name,
+        node,
+        options.framework,
+    );
     let (events, delivered) = events::Events::join(
         fleet,
         &options.name,
@@ -229,12 +238,18 @@ impl Link {
     /// application and from across the Link. Subscribing is what tells the
     /// edge's side to send them.
     #[napi]
-    pub fn subscribe(&self, topics: Vec<String>) {
+    pub fn subscribe(
+        &self,
+        topics: Vec<String>,
+    ) {
         self.events.subscribe(topics);
     }
 
     #[napi]
-    pub fn unsubscribe(&self, topics: Vec<String>) {
+    pub fn unsubscribe(
+        &self,
+        topics: Vec<String>,
+    ) {
         self.events.unsubscribe(topics);
     }
 
@@ -303,7 +318,9 @@ impl Link {
             return;
         }
         match command.name.as_str() {
-            "status" if command.target.is_none() => self.lifecycle.publish_state(),
+            "status" if command.target.is_none() => {
+                self.lifecycle.publish_state()
+            }
             "start" | "stop" | "restart" => {
                 let ours = command.target.as_ref().is_some_and(|target| {
                     target.runtime == RUNTIME && target.name == self.name
@@ -312,7 +329,9 @@ impl Link {
                     && let Err(error) =
                         self.events.publish_lifecycle(&command.name)
                 {
-                    eprintln!("orbit-js: lifecycle command could not spread: {error}");
+                    eprintln!(
+                        "orbit-js: lifecycle command could not spread: {error}"
+                    );
                 }
             }
             _ => self.lifecycle.command(command.name, command.payload),
@@ -501,7 +520,10 @@ impl Exchange {
 
     /// Write a piece of the reply body.
     #[napi]
-    pub async fn write(&self, chunk: Buffer) -> Result<()> {
+    pub async fn write(
+        &self,
+        chunk: Buffer,
+    ) -> Result<()> {
         let mut held = self.outgoing.lock().await;
         let Some(outgoing) = held.as_mut() else {
             return Err(Error::new(

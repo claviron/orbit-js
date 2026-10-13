@@ -13,7 +13,7 @@ const native = require("./orbit.node");
 /**
  * Take a lane in `fleet` under `name`.
  *
- * @param {{ fleet: string, name: string }} options
+ * @param {{ fleet: string, name: string, framework?: string }} options
  * @returns {Promise<Link>}
  */
 export async function join(options) {
