@@ -45,8 +45,10 @@ pub struct JoinOptions {
     pub fleet: String,
     /// The name this process serves in that fleet.
     pub name: String,
-    /// Application-declared framework, independent of the JavaScript engine.
-    pub framework: Option<String>,
+    /// Prepared framework tags, independent of the JavaScript engine.
+    pub frameworks: Vec<String>,
+    /// Symbolic admin-client icon code; unknown codes fall back in the client.
+    pub icon: Option<String>,
 }
 
 /// This process's place in a Link fleet.
@@ -108,7 +110,8 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
         Arc::clone(&segment),
         &options.name,
         node,
-        options.framework,
+        options.frameworks,
+        options.icon,
     );
     let (events, delivered) = events::Events::join(
         fleet,

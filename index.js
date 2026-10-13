@@ -6,18 +6,22 @@
 // Deno, Node and Bun load the same module; Deno needs --allow-ffi.
 
 import { createRequire } from "node:module";
+import { discoverFrameworks } from "./framework.js";
 
 const require = createRequire(import.meta.url);
 const native = require("./orbit.node");
 
 /**
- * Take a lane in `fleet` under `name`.
+ * Take a lane in `fleet` under `name`. An explicit framework wins; otherwise
+ * the application's package.json supplies management metadata at join.
  *
- * @param {{ fleet: string, name: string, framework?: string }} options
+ * @param {{ fleet: string, name: string, frameworks?: string[], framework?: string, icon?: string }} options
  * @returns {Promise<Link>}
  */
 export async function join(options) {
-  return new Link(await native.join(options));
+  const frameworks = options.frameworks ?? (options.framework != null
+    ? [options.framework] : await discoverFrameworks());
+  return new Link(await native.join({ ...options, frameworks }));
 }
 
 /** This process's place in a Link fleet: requests in, events both ways. */
@@ -237,7 +241,7 @@ export class Link {
  * Serve `handler` until `options.signal` aborts, then release the lane so the
  * edge stops choosing it. Requests already taken still finish.
  *
- * @param {{ fleet: string, name: string, signal?: AbortSignal }} options
+ * @param {{ fleet: string, name: string, frameworks?: string[], framework?: string, icon?: string, signal?: AbortSignal }} options
  * @param {(request: Request) => Response | Promise<Response>} handler
  */
 export async function serve(options, handler) {

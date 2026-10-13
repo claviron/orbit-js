@@ -64,13 +64,15 @@ impl Lifecycle {
         segment: Arc<TransportSegment>,
         name: &str,
         lane: u16,
-        framework: Option<String>,
+        frameworks: Vec<String>,
+        icon: Option<String>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<ControlEvent>) {
         let (notify, receiver) = mpsc::unbounded_channel();
         (
             Arc::new(Self {
                 description: ApplicationDescription {
-                    framework,
+                    frameworks,
+                    icon,
                     ..ApplicationDescription::new("javascript", "fetch")
                         .runner("orbit-js")
                 },

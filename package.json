@@ -7,7 +7,7 @@
   "exports": {
     ".": "./index.js"
   },
-  "files": ["index.js", "orbit.node"],
+  "files": ["index.js", "framework.js", "orbit.node"],
   "scripts": {
     "build": "sh scripts/build.sh"
   },
