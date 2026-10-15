@@ -553,6 +553,7 @@ version = "0.2.0-alpha.16"
 dependencies = [
  "async-trait",
  "bytes",
+ "claviron-helpers",
  "claviron-orbit",
  "claviron-runtime",
  "futures-util",
@@ -574,6 +575,8 @@ dependencies = [
  "orbitive",
  "serde_json",
  "thiserror 2.0.21",
+ "time",
+ "uuid",
 ]
 
 [[package]]
@@ -764,6 +767,7 @@ dependencies = [
  "orbitive",
  "regex",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror 2.0.21",
  "tokio",
@@ -998,7 +1002,6 @@ dependencies = [
  "async-trait",
  "dotenw",
  "glob",
- "notify",
  "serde",
  "serde-value",
  "serde_yaml",
@@ -1026,6 +1029,7 @@ dependencies = [
  "async-trait",
  "congif",
  "dashmap",
+ "humantime-serde",
  "serde",
  "tokio",
  "tokio-util",
@@ -2532,6 +2536,7 @@ version = "0.5.3"
 dependencies = [
  "bytes",
  "lru",
+ "orbit-arena",
  "orbit-core",
 ]
 
@@ -2597,6 +2602,7 @@ dependencies = [
  "orbit-events",
  "orbit-stream",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
