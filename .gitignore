@@ -5,3 +5,5 @@
 *.md
 !README.md
 /AGENTS.local.md
+
+/native/*/release.json

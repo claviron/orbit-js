@@ -1,11 +1,13 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Maintainer build: consumers load prebuilt binaries and never run Cargo.
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/cargo.sh
+prepare_cargo_target
 mode=${1:-release}
 case "$mode" in
     release|debug) ;;
-    *) echo "Usage: scripts/build.sh [release|debug]" >&2; exit 2 ;;
+    *) echo "Usage: scripts/build-native.sh [release|debug]" >&2; exit 2 ;;
 esac
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) target=aarch64-apple-darwin; library=liborbit_js_addon.dylib ;;

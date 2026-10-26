@@ -128,25 +128,58 @@ open a network listener.
 
 ## Native binaries
 
-Release packages contain prebuilt Node-API 8 modules for macOS arm64 and
-Linux x64 (glibc). The loader selects the local platform; installation does
-not run Cargo or download an executable from another server. Musl, Windows,
-Linux arm64 and Intel macOS are not supported by this initial package.
+The release matrix contains five Node-API 8 addons:
 
-The npm package is not published yet. Maintainers build each binary on its target
-platform with `npm run build` (release) or `npm run build -- debug` for local
-development. These commands build the `addon/` workspace member. The binaries are staged under
-`native/darwin-arm64/` and `native/linux-x64-gnu/`, not the old root `orbit.node`.
+| Platform | Rust target | Package directory |
+| --- | --- | --- |
+| macOS arm64 | `aarch64-apple-darwin` | `native/darwin-arm64/` |
+| FreeBSD x64 | `x86_64-unknown-freebsd` | `native/freebsd-x64/` |
+| FreeBSD arm64 | `aarch64-unknown-freebsd` | `native/freebsd-arm64/` |
+| Linux x64, glibc | `x86_64-unknown-linux-gnu` | `native/linux-x64-gnu/` |
+| Linux arm64, glibc | `aarch64-unknown-linux-gnu` | `native/linux-arm64-gnu/` |
 
-To collect a binary built elsewhere, use
-`node scripts/stage-native.js RUST_TARGET ARTIFACT_PATH` with
-`aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`.
-Run `npm test` for loader tests and `npm run check:package` to check both
-artifacts before packaging. `npm pack` also runs this completeness check;
-each binary still needs a load test on its target runtime before release.
-The Linux build host determines the required glibc baseline: build on the
-oldest supported environment rather than assuming every Linux installation
-can load a binary built on a newer distribution.
+The loader selects the local platform. Installation does not run Cargo or
+download executables. Musl, Windows and Intel macOS are outside this matrix.
+The npm package has not been published yet; each target needs runtime validation
+on its own OS before release.
+
+For local development, `npm run build` or `scripts/build-native.sh` builds the
+addon in release mode; `npm run build -- debug` selects debug mode. This keeps
+local Rust flags, including an explicit CPU optimization. It does not prepare
+a publishable release. On shared Linux/FreeBSD development mounts, build scripts
+use the configured `set_cargo_target` helper when available. Without that helper,
+Cargo keeps its normal output configuration.
+
+For publication, run the following on each target host at the same source revision:
+
+```sh
+scripts/publish.sh --prepare
+```
+
+This builds only the current host's addon and exits. Preparation uses release
+mode with a portable CPU baseline (`x86-64` or AArch64 `generic`), replacing local
+Rust flags, and stages the binary with a `release.json` receipt. Collect each
+complete `native/<target>/` directory into the publishing checkout. Receipts bind
+the binary checksum to the package version and addon source digest; they are
+preparation metadata and are excluded from the npm package. A later local build
+that replaces a prepared binary requires preparation again.
+
+Once all five prepared targets are present:
+
+```sh
+scripts/publish.sh --dry-run
+scripts/publish.sh --publish
+```
+
+There is no default action. Missing targets, mismatched architectures, stale
+receipts or modified binaries stop publication and are reported for every target.
+`npm run check:package`, `npm pack` and npm's `prepublishOnly` hook use the same
+check. A dry run performs npm's publication checks without uploading a package.
+Neither publication action builds a missing target automatically.
+
+These checks inspect library headers and preparation metadata; they do not prove
+runtime or OS ABI compatibility. Build Linux binaries on the oldest supported
+glibc environment and validate each FreeBSD build on its supported OS version.
 
 ### HTTP exchange completion
 

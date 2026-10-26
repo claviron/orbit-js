@@ -10,12 +10,12 @@
   },
   "files": ["index.js", "binding.js", "session.js", "framework.js", "native.js", "native/**/*.node", "README.md"],
   "scripts": {
-    "build": "sh scripts/build.sh",
+    "build": "bash scripts/build-native.sh",
     "test": "node --test tests/*.test.js",
     "check:package": "node scripts/check-package.js",
-    "prepack": "npm run check:package"
+    "prepack": "npm run check:package",
+    "prepublishOnly": "npm run check:package"
   },
   "publishConfig": { "access": "public" },
-  "license": "MIT",
-  "private": true
+  "license": "MIT"
 }
