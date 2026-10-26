@@ -7,3 +7,6 @@
 /AGENTS.local.md
 
 /native/*/release.json
+
+/prebuilds/
+/.release-sync.local.json

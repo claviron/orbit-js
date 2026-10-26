@@ -8,7 +8,19 @@
     ".": "./index.js",
     "./binding": "./binding.js"
   },
-  "files": ["index.js", "binding.js", "session.js", "framework.js", "native.js", "native/**/*.node", "README.md"],
+  "files": [
+    "index.js",
+    "binding.js",
+    "session.js",
+    "framework.js",
+    "native.js",
+    "prebuilds/darwin-arm64/orbit.node",
+    "prebuilds/freebsd-x64/orbit.node",
+    "prebuilds/freebsd-arm64/orbit.node",
+    "prebuilds/linux-x64-gnu/orbit.node",
+    "prebuilds/linux-arm64-gnu/orbit.node",
+    "README.md"
+  ],
   "scripts": {
     "build": "bash scripts/build-native.sh",
     "test": "node --test tests/*.test.js",

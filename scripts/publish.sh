@@ -10,8 +10,8 @@ Usage: scripts/publish.sh --prepare | --dry-run | --publish
 --dry-run  Require all five prepared targets and run npm publish --dry-run.
 --publish  Require all five prepared targets and publish to npm.
 
-No action is selected by default. Prepare each target on its own host and
-collect its native/<target>/ directory, including release.json, before publishing.
+No action is selected by default. Prepare each target on its own host, then
+use scripts/sync.sh to collect its .node and release.json before publishing.
 HELP
 }
 

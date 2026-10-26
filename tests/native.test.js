@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadNative, nativeTarget } from "../native.js";
 
-test("selects only the binary for the requested platform", () => {
+test("loads packaged prebuilds and keeps source-only native builds separate", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orbit-loader-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  await copyFile(new URL("../native.js", import.meta.url), join(root, "native.js"));
+  const { loadNative: load } = await import(pathToFileURL(join(root, "native.js")));
   for (const [platform, arch, target] of [
     ["darwin", "arm64", "darwin-arm64"],
     ["linux", "x64", "linux-x64-gnu"],
@@ -12,10 +21,13 @@ test("selects only the binary for the requested platform", () => {
   ]) {
     const binding = {};
     const requested = [];
-    assert.equal(loadNative(platform, arch, (path) => {
-      requested.push(path);
-      return binding;
-    }), binding);
+    const capture = (path) => { requested.push(path); return binding; };
+    assert.equal(load(platform, arch, capture), binding);
+    assert.deepEqual(requested, [`./prebuilds/${target}/orbit.node`]);
+    await mkdir(join(root, "native", target), { recursive: true });
+    await writeFile(join(root, "native", target, "orbit.node"), "local fixture");
+    requested.length = 0;
+    assert.equal(load(platform, arch, capture), binding);
     assert.deepEqual(requested, [`./native/${target}/orbit.node`]);
   }
 });

@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,14 +36,15 @@ export async function sourceDigest(root = repository) {
   }
   async function directory(relative) {
     const entries = await readdir(join(root, relative), { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+    for (const entry of entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const path = `${relative}/${entry.name}`;
       if (entry.isDirectory()) await directory(path);
       else if (entry.isFile()) await include(path);
     }
   }
   for (const path of ["package.json", "Cargo.toml", "Cargo.lock", "addon/Cargo.toml",
-    "addon/build.rs", "native.js", "scripts/release.js", "scripts/stage-native.js"]) {
+    "addon/build.rs", "index.js", "binding.js", "session.js", "framework.js", "native.js",
+    "scripts/release.js", "scripts/stage-native.js"]) {
     await include(path);
   }
   await directory("src");
@@ -50,20 +52,49 @@ export async function sourceDigest(root = repository) {
   return hash.digest("hex");
 }
 
+export async function releaseContext(root = repository) {
+  const { name, version } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  return { name, version, source: await sourceDigest(root) };
+}
+
+export async function readPrepared(target, directory, context) {
+  const bytes = await readFile(join(directory, "orbit.node"));
+  validateBinary(target, bytes);
+  const receipt = JSON.parse(await readFile(join(directory, "release.json"), "utf8"));
+  if (receipt.format !== 1 || receipt.package !== context.name || receipt.version !== context.version ||
+    receipt.target !== nativeTargets[target] || receipt.profile !== "release" ||
+    receipt.cpu !== cpuFor(target) || receipt.napi !== 8 ||
+    receipt.source !== context.source || receipt.sha256 !== digest(bytes)) {
+    throw new Error(`preparation does not match ${context.name}@${context.version} and its sources/binary; run --prepare on its host`);
+  }
+  return { bytes, receipt };
+}
+
+export async function stagePrepared(root, target, bytes, receipt) {
+  if (!Object.hasOwn(nativeTargets, target)) throw new Error(`Unknown target: ${target}`);
+  const directory = join(root, "prebuilds", target);
+  await mkdir(directory, { recursive: true });
+  const suffix = `${process.pid}.${randomUUID()}.tmp`;
+  const binaryTemporary = join(directory, `orbit.node.${suffix}`);
+  const receiptTemporary = join(directory, `release.json.${suffix}`);
+  try {
+    await writeFile(binaryTemporary, bytes);
+    await writeFile(receiptTemporary, `${JSON.stringify(receipt, null, 2)}\n`);
+    // Replace inodes; a process may still have an earlier binary mapped.
+    // A check between these renames fails closed on a mismatched checksum.
+    await rename(binaryTemporary, join(directory, "orbit.node"));
+    await rename(receiptTemporary, join(directory, "release.json"));
+  } finally {
+    await rm(binaryTemporary, { force: true });
+    await rm(receiptTemporary, { force: true });
+  }
+}
+
 export async function inspectPackage(root = repository) {
-  const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  const source = await sourceDigest(root);
-  return Promise.all(Object.entries(nativeTargets).map(async ([target, triple]) => {
+  const context = await releaseContext(root);
+  return Promise.all(Object.keys(nativeTargets).map(async (target) => {
     try {
-      const directory = join(root, "native", target);
-      const bytes = await readFile(join(directory, "orbit.node"));
-      validateBinary(target, bytes);
-      const receipt = JSON.parse(await readFile(join(directory, "release.json"), "utf8"));
-      if (receipt.target !== triple || receipt.version !== version ||
-        receipt.profile !== "release" || receipt.cpu !== cpuFor(target) ||
-        receipt.source !== source || receipt.sha256 !== digest(bytes)) {
-        throw new Error("release preparation is stale or the binary changed; run --prepare on its host");
-      }
+      await readPrepared(target, join(root, "prebuilds", target), context);
       return { target, ready: true };
     } catch (error) {
       return { target, ready: false, error: error.message };
@@ -81,23 +112,21 @@ async function prepare() {
   const target = nativeTarget();
   const triple = nativeTargets[target];
   const cpu = cpuFor(target);
-  const source = await sourceDigest();
-  const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
-  console.log(`Preparing ${target}: release, target-cpu=${cpu} (local Rust flags are replaced).`);
+  const context = await releaseContext();
+  console.log(`Preparing ${context.name}@${context.version} ${target}: release, target-cpu=${cpu} (local Rust flags are replaced).`);
   // Override developer CPU/feature flags for every Rust dependency as well as the addon.
   run("cargo", ["build", "--manifest-path", "addon/Cargo.toml", "--locked", "--release", "--target", triple], {
     env: { ...process.env, CARGO_ENCODED_RUSTFLAGS: `-C\x1ftarget-cpu=${cpu}` },
   });
-  if (source !== await sourceDigest()) throw new Error("sources changed during preparation; run --prepare again");
+  if (context.source !== await sourceDigest()) throw new Error("sources changed during preparation; run --prepare again");
   const library = target === "darwin-arm64" ? "liborbit_js_addon.dylib" : "liborbit_js_addon.so";
   const artifact = join(process.env.CARGO_TARGET_DIR || "target", triple, "release", library);
-  validateBinary(target, await readFile(resolve(repository, artifact)));
-  run(process.execPath, ["scripts/stage-native.js", triple, artifact]);
-  const directory = join(repository, "native", target);
-  const bytes = await readFile(join(directory, "orbit.node"));
-  const receipt = { target: triple, version, profile: "release", cpu, source, sha256: digest(bytes) };
-  await writeFile(join(directory, "release.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-  console.log(`Prepared native/${target}/; no package was published.`);
+  const bytes = await readFile(resolve(repository, artifact));
+  validateBinary(target, bytes);
+  const receipt = { format: 1, package: context.name, version: context.version, target: triple,
+    profile: "release", cpu, napi: 8, source: context.source, sha256: digest(bytes) };
+  await stagePrepared(repository, target, bytes, receipt);
+  console.log(`Prepared prebuilds/${target}/ for ${context.version}; native/ is unchanged. No package was published.`);
 }
 
 export async function checkPackage(root = repository) {
@@ -109,7 +138,7 @@ export async function checkPackage(root = repository) {
   return results.every((result) => result.ready);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [action, ...extra] = process.argv.slice(2);
     if (extra.length || !["--prepare", "--publish", "--dry-run"].includes(action)) {

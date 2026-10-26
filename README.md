@@ -132,37 +132,87 @@ The release matrix contains five Node-API 8 addons:
 
 | Platform | Rust target | Package directory |
 | --- | --- | --- |
-| macOS arm64 | `aarch64-apple-darwin` | `native/darwin-arm64/` |
-| FreeBSD x64 | `x86_64-unknown-freebsd` | `native/freebsd-x64/` |
-| FreeBSD arm64 | `aarch64-unknown-freebsd` | `native/freebsd-arm64/` |
-| Linux x64, glibc | `x86_64-unknown-linux-gnu` | `native/linux-x64-gnu/` |
-| Linux arm64, glibc | `aarch64-unknown-linux-gnu` | `native/linux-arm64-gnu/` |
+| macOS arm64 | `aarch64-apple-darwin` | `prebuilds/darwin-arm64/` |
+| FreeBSD x64 | `x86_64-unknown-freebsd` | `prebuilds/freebsd-x64/` |
+| FreeBSD arm64 | `aarch64-unknown-freebsd` | `prebuilds/freebsd-arm64/` |
+| Linux x64, glibc | `x86_64-unknown-linux-gnu` | `prebuilds/linux-x64-gnu/` |
+| Linux arm64, glibc | `aarch64-unknown-linux-gnu` | `prebuilds/linux-arm64-gnu/` |
 
 The loader selects the local platform. Installation does not run Cargo or
-download executables. Musl, Windows and Intel macOS are outside this matrix.
+fetch executables. Musl, Windows and Intel macOS are outside this matrix.
 The npm package has not been published yet; each target needs runtime validation
 on its own OS before release.
 
-For local development, `npm run build` or `scripts/build-native.sh` builds the
-addon in release mode; `npm run build -- debug` selects debug mode. This keeps
-local Rust flags, including an explicit CPU optimization. It does not prepare
-a publishable release. On shared Linux/FreeBSD development mounts, build scripts
-use the configured `set_cargo_target` helper when available. Without that helper,
-Cargo keeps its normal output configuration.
+### Local development
 
-For publication, run the following on each target host at the same source revision:
+`npm run build` or `scripts/build-native.sh` builds a local addon in release
+mode; `npm run build -- debug` selects debug mode. It stages the file under
+`native/<target>/`, keeps operator-supplied Rust flags and may use CPU-specific
+optimizations for the build host. This directory is for development and tests
+and is excluded from the npm package. A source checkout loads its local native
+file when present; otherwise it selects the platform's portable prebuild.
+
+On shared Linux/FreeBSD development mounts, build scripts use the configured
+`set_cargo_target` helper when available. Without it, Cargo keeps its normal
+output configuration.
+
+### Prepare the active release
+
+Use the same package version and addon sources on every build host:
 
 ```sh
 scripts/publish.sh --prepare
 ```
 
-This builds only the current host's addon and exits. Preparation uses release
-mode with a portable CPU baseline (`x86-64` or AArch64 `generic`), replacing local
-Rust flags, and stages the binary with a `release.json` receipt. Collect each
-complete `native/<target>/` directory into the publishing checkout. Receipts bind
-the binary checksum to the package version and addon source digest; they are
-preparation metadata and are excluded from the npm package. A later local build
-that replaces a prepared binary requires preparation again.
+Preparation builds only the current host's addon, stages it under
+`prebuilds/<target>/`, then exits. Local `native/` files are unchanged.
+It uses release mode with a portable CPU baseline (`x86-64` or AArch64
+`generic`), replacing local Rust flags. `release.json` records the package
+name, full version, Rust target, profile, CPU baseline, Node-API version,
+source digest and binary checksum. The source digest covers the package's
+Rust sources, manifests, lockfile and JavaScript adapter files.
+
+The five targets share the active package version rather than independently
+versioned binaries. Changing that version or those sources invalidates previous
+preparation records. Prepared files and receipts stay outside Git.
+
+### Collect prepared files
+
+Synchronization is a separate operation. Put builder locations in an ignored
+`.release-sync.local.json` file, for example:
+
+```json
+{
+  "targets": {
+    "linux-x64-gnu": {
+      "source": "builder@linux.example.test:/srv/orbit/prebuilds/linux-x64-gnu/"
+    },
+    "freebsd-arm64": {
+      "source": "builder@freebsd.example.test:/srv/orbit/prebuilds/freebsd-arm64/"
+    }
+  }
+}
+```
+
+Each source is a directory with `orbit.node` and `release.json`. A local source
+is resolved relative to the sync config; use local paths when checkouts share
+one filesystem. Remote sources use rsync's `host:path` syntax. Configure only
+the targets collected from builders; other targets may already be prepared
+in the publishing checkout.
+
+```sh
+scripts/sync.sh
+scripts/sync.sh --config /path/to/sync.local.json
+```
+
+The script transfers only the binary and its receipt into a temporary directory,
+checks them against the active version and sources, then installs the verified
+pair into `prebuilds/<target>/`. It reports each missing, invalid or unavailable
+target and exits unsuccessfully if any configured target fails. Rejected targets
+leave existing prepared files intact. A shared source already at the destination
+is verified without copying. Sync neither builds nor publishes.
+
+### Publish
 
 Once all five prepared targets are present:
 
@@ -171,12 +221,14 @@ scripts/publish.sh --dry-run
 scripts/publish.sh --publish
 ```
 
-There is no default action. Missing targets, mismatched architectures, stale
-receipts or modified binaries stop publication and are reported for every target.
-`npm run check:package`, `npm pack` and npm's `prepublishOnly` hook use the same
-check. A dry run performs npm's publication checks without uploading a package.
-Neither publication action builds a missing target automatically.
+There is no default publication action. Missing targets, mismatched architectures,
+stale receipts or modified binaries stop publication and are reported for every
+target. `npm run check:package`, `npm pack` and npm's `prepublishOnly` hook use
+the same check. A dry run performs npm's publication checks without uploading.
+Publication does not synchronize or build missing targets automatically.
 
+Only the portable `.node` files under `prebuilds/` enter the npm package;
+`native/`, receipts and the private sync setup are excluded.
 These checks inspect library headers and preparation metadata; they do not prove
 runtime or OS ABI compatibility. Build Linux binaries on the oldest supported
 glibc environment and validate each FreeBSD build on its supported OS version.

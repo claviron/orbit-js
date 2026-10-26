@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import process from "node:process";
 
 const require = createRequire(import.meta.url);
@@ -23,11 +24,15 @@ export function nativeTarget(platform = process.platform, arch = process.arch) {
   );
 }
 
-// Package-relative paths only: never load another installation or compile on import.
+// Source builds stay local; npm packages contain only portable prebuilds.
+// Paths stay package-relative; loading never compiles or searches another installation.
 export function loadNative(platform = process.platform, arch = process.arch, load = require) {
   const target = nativeTarget(platform, arch);
   try {
-    return load(`./native/${target}/orbit.node`);
+    const local = `./native/${target}/orbit.node`;
+    const path = existsSync(new URL(local, import.meta.url))
+      ? local : `./prebuilds/${target}/orbit.node`;
+    return load(path);
   } catch (cause) {
     throw new Error(
       `@claviron/orbit could not load its ${target} binary. ` +
