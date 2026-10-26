@@ -1,272 +1,172 @@
 # orbit-js
 
-## Rust development
+**Build a JavaScript native module with Orbit connectivity and your own Rust code.**
 
-The root crate is a Rust library built on Claviron's Link transport. Node-API is an optional
-adapter selected with the `napi` feature.
+This is the source repository for [`@claviron/orbit`](https://www.npmjs.com/package/@claviron/orbit).
+It provides a reusable Rust library, a Node-API addon, and JavaScript adapters for
+connecting Node, Deno or Bun applications to a Claviron edge over same-host Orbit
+Link. Claviron owns public HTTP connections and routing; the application handles
+requests through standard `Request` and `Response` objects.
 
-- `src/`: Link, exchanges, events and cells, independent of JavaScript types.
-- `addon/`: the small ready-to-load native module.
-- `examples/rust-addon/`: an application's own native module, with a Rust
-  function and Orbit bindings in the same binary.
+For installation and application examples, read the [npm package README](npm/README.md).
 
-An application addon enables `orbit-js`'s `napi` feature and calls:
+## Add your own native capabilities
+
+You can keep Orbit's bindings and export additional Rust functions from the same
+`.node` module. For example, add a parser, image processing, a computation-heavy
+operation, or an adapter to another Rust library. Your functions run in the
+application process and are available beside Orbit's connection API.
+
+The [application-owned addon example](examples/rust-addon) demonstrates this:
 
 ```rust
 orbit_js::export_bindings!();
-```
 
-This emits the bindings in the final addon, where Node-API registers them.
-Application functions can be exported alongside them with `#[napi]`. The
-transport implementation stays in the shared library.
-
-The JavaScript adapter can use that application's binary explicitly:
-
-```js
-import { createOrbit } from "./binding.js";
-const orbit = createOrbit(native);
-```
-
-The binding entry does not load a bundled binary, probe the platform or invoke
-Cargo. The default package entry retains automatic selection of a prebuilt
-binary. See [the Rust addon example](examples/rust-addon/README.md).
-
-Application introductions use Claviron's common management description:
-JavaScript runtime, orbit-js runner and fetch request mode. Pass the framework
-explicitly with `join({ fleet, name, frameworks: ["Hono"] })`; it is optional and
-an explicit list is preserved, including `[]` to suppress discovery. The scalar
-`framework` option remains a one-label shorthand. Otherwise, `join` reads the nearest
-`package.json` above the application's working directory. Its `dependencies`
-and `peerDependencies` identify Hono, Elysia, Express, Fastify, Koa, NestJS or
-Hapi; multiple distinct frameworks remain separate tags. Development dependencies
-and framework helper packages do not count. Start the process in its
-application directory, not the installed Orbit package directory.
-Missing or unrecognized metadata remains unknown; unreadable or malformed
-metadata emits a warning without preventing join. In Deno, detection follows
-the runtime's file-read permissions; an explicit framework skips file reads.
-The native lifecycle owner stores the resolved description once, and includes
-it in existing Link status reports, never HTTP dispatch. This metadata does not
-import frameworks or select application behavior.
-Description-bearing application reports require matching rebuilt native addons
-and edges; no Link/stream SHM geometry changes or automatic cleanup is needed.
-
-Pass `icon: "javascript"` or a known GUI icon code such as `"server"` to select
-the admin-client icon. Unknown/absent codes use the runtime default; no image
-bytes, filesystem path or URL cross the Link, and dispatch is unchanged.
-
-Serve a JavaScript application — Deno, Node or Bun — behind a Claviron edge
-over Orbit Link, with the whole JavaScript ecosystem and no runner around it.
-
-```js
-import { serve } from "@claviron/orbit";
-
-await serve({ fleet: "shop", name: "storefront" }, async (request) => {
-  return new Response(`hello from ${new URL(request.url).pathname}`);
-});
-```
-
-The edge routes a host or path to the `storefront` name in the `shop` fleet;
-this process takes a lane there and answers. Deno needs `--allow-ffi` to load
-the module.
-
-Status: early; see `PLAN.md`.
-
-On macOS arm64, an HTTP/1.1 load check completed with Node 24.13.1 and eight
-application processes. Deno 2.9.8 can stop progressing at native-to-JavaScript
-completion under sustained load with eight processes; that investigation remains open.
-
-## WebSocket and WebTransport
-
-Use `onSession` for WebSockets over HTTP/1.1 or HTTP/2, and reliable
-bidirectional WebTransport streams over HTTP/3. HTTP and SSE continue through
-the Fetch handler. The edge owns the network handshake and protocol framing;
-JavaScript receives message sessions over the same Link.
-
-```js
-await serve({
-  fleet: "shop",
-  name: "storefront",
-  async onSession(session) {
-    // Check session.url and session.headers before accepting, or reject(403).
-    await session.accept({ maxMessageBytes: 64 * 1024 });
-    for await (const message of session) {
-      await session.send(message);
-    }
-  },
-}, (request) => new Response("HTTP response"));
-```
-
-For an existing Link, use `link.serve(fetchHandler, { onSession })`.
-`session.transport` is `websocket` or `webtransport`; `httpVersion` is
-`1.1`, `2` or `3`. `method` and request headers retain the original values,
-including `CONNECT` for HTTP/2 and HTTP/3.
-
-`accept` requires a positive `maxMessageBytes`, measured in UTF-8 bytes for
-text. `receive()` returns a string, a `Uint8Array`, or `null` at input end.
-Await each `send()`; one reader and one writer can run independently, and
-concurrent reads or concurrent writes are rejected rather than queued.
-Input FIN leaves output usable. A received Close completes the close handshake;
-`closeCode` and `closeReason` describe it. `close(code, reason)` sends a close
-record and finishes output; `abort()` resets the stream and wakes blocked IO.
-
-The handler owns the session until it returns. An accepted session then closes
-normally; an unanswered one is rejected with 501. `reject(status, headers)`
-refuses admission explicitly. Stop, restart or Link closure aborts the session's
-`signal` and resets accepted streams, including backpressured writes. New
-sessions can be served after restart. No handler means session requests get 501.
-
-Each WebTransport bidi stream is a separate message session. Its client uses
-the Link record format: a one-byte kind, a four-byte little-endian payload
-length, then the payload. Kinds are 1 (UTF-8 text), 2 (binary), and 8 (close:
-little-endian u16 code plus UTF-8 reason). Datagrams, unidirectional streams and
-server-created WebTransport streams are outside this API.
-
-These APIs require matching rebuilt edge and native-addon code. The
-`examples/session.rs` probe exercises two concurrent Link sessions with text,
-binary data larger than the stream buffer, and a close handshake; it does not
-open a network listener.
-
-## Native binaries
-
-The release matrix contains five Node-API 8 addons:
-
-| Platform | Rust target | Package directory |
-| --- | --- | --- |
-| macOS arm64 | `aarch64-apple-darwin` | `prebuilds/darwin-arm64/` |
-| FreeBSD x64 | `x86_64-unknown-freebsd` | `prebuilds/freebsd-x64/` |
-| FreeBSD arm64 | `aarch64-unknown-freebsd` | `prebuilds/freebsd-arm64/` |
-| Linux x64, glibc | `x86_64-unknown-linux-gnu` | `prebuilds/linux-x64-gnu/` |
-| Linux arm64, glibc | `aarch64-unknown-linux-gnu` | `prebuilds/linux-arm64-gnu/` |
-
-The loader selects the local platform. Installation does not run Cargo or
-fetch executables. Musl, Windows and Intel macOS are outside this matrix.
-The npm package has not been published yet; each target needs runtime validation
-on its own OS before release.
-
-### Local development
-
-`npm run build` or `scripts/build-native.sh` builds a local addon in release
-mode; `npm run build -- debug` selects debug mode. It stages the file under
-`native/<target>/`, keeps operator-supplied Rust flags and may use CPU-specific
-optimizations for the build host. This directory is for development and tests
-and is excluded from the npm package. A source checkout loads its local native
-file when present; otherwise it selects the platform's portable prebuild.
-
-On shared Linux/FreeBSD development mounts, build scripts use the configured
-`set_cargo_target` helper when available. Without it, Cargo keeps its normal
-output configuration.
-
-### Prepare the active release
-
-Use the same package version and addon sources on every build host:
-
-```sh
-scripts/publish.sh --prepare
-```
-
-Preparation builds only the current host's addon, stages it under
-`prebuilds/<target>/`, then exits. Local `native/` files are unchanged.
-It uses release mode with a portable CPU baseline (`x86-64` or AArch64
-`generic`), replacing local Rust flags. `release.json` records the package
-name, full version, Rust target, profile, CPU baseline, Node-API version,
-source digest and binary checksum. The source digest covers the package's
-Rust sources, manifests, lockfile and JavaScript adapter files.
-
-The five targets share the active package version rather than independently
-versioned binaries. Changing that version or those sources invalidates previous
-preparation records. Prepared files and receipts stay outside Git.
-
-### Collect prepared files
-
-Synchronization is a separate operation. Put builder locations in an ignored
-`.release-sync.local.json` file, for example:
-
-```json
-{
-  "targets": {
-    "linux-x64-gnu": {
-      "source": "builder@linux.example.test:/srv/orbit/prebuilds/linux-x64-gnu/"
-    },
-    "freebsd-arm64": {
-      "source": "builder@freebsd.example.test:/srv/orbit/prebuilds/freebsd-arm64/"
-    }
-  }
+#[napi_derive::napi]
+pub fn greeting(name: String) -> String {
+    format!("Hello, {name}, from the application's Rust module!")
 }
 ```
 
-Each source is a directory with `orbit.node` and `release.json`. A local source
-is resolved relative to the sync config; use local paths when checkouts share
-one filesystem. Remote sources use rsync's `host:path` syntax. Configure only
-the targets collected from builders; other targets may already be prepared
-in the publishing checkout.
+The addon is a Rust `cdylib` using `orbit-js` with its `napi` feature, `napi` with
+`napi8`, and `napi-derive`. Its build script calls `napi_build::setup()` through
+the `napi-build` build dependency. See the example's [Cargo manifest](examples/rust-addon/Cargo.toml)
+and [build script](examples/rust-addon/build.rs) for the complete setup.
 
-```sh
-scripts/sync.sh
-scripts/sync.sh --config /path/to/sync.local.json
+Load that module explicitly and pass it to the JavaScript adapter:
+
+```js
+import { createRequire } from "node:module";
+import { createOrbit } from "@claviron/orbit/binding";
+
+const require = createRequire(import.meta.url);
+const native = require("./my-addon.node");
+const orbit = createOrbit(native);
+
+await orbit.serve({ fleet: "apps", name: "hello" }, () => {
+  return new Response(native.greeting("JavaScript"));
+});
 ```
 
-The script transfers only the binary and its receipt into a temporary directory,
-checks them against the active version and sources, then installs the verified
-pair into `prebuilds/<target>/`. It reports each missing, invalid or unavailable
-target and exits unsuccessfully if any configured target fails. Rejected targets
-leave existing prepared files intact. A shared source already at the destination
-is verified without copying. Sync neither builds nor publishes.
+The `/binding` entry point uses your supplied addon without loading a bundled
+prebuilt binary. Keep `export_bindings!()` in your addon to provide the native
+interface that `createOrbit()` expects. A compatible edge must route to the same
+fleet and application name on the same host.
 
-### Publish
+Orbit also exposes application events, shared cells, lifecycle notifications and
+message sessions. Additional native exports can implement application-specific
+work; changing the Orbit transport itself also requires compatibility with the
+edge. Long-running native work should use an appropriate asynchronous Node-API
+interface so it does not block JavaScript execution.
 
-Once all five prepared targets are present:
+## Build from source
 
-```sh
-scripts/publish.sh --dry-run
-scripts/publish.sh --publish
-```
+You need a compatible stable Rust toolchain, Node.js with npm, and the native
+compiler/linker for your target. Node-API 8 is the addon ABI. There are no npm
+build dependencies to install for the current source tree.
 
-There is no default publication action. Missing targets, mismatched architectures,
-stale receipts or modified binaries stop publication and are reported for every
-target. `npm run check:package`, `npm pack` and npm's `prepublishOnly` hook use
-the same check. A dry run performs npm's publication checks without uploading.
-Publication does not synchronize or build missing targets automatically.
+**Source dependency status:** this development snapshot depends on a compatible
+Claviron source checkout. Before building, set the `claviron` dependency's `path`
+in `Cargo.toml` to your checkout, retaining its `orbit` and `application` features.
+Use the revision that provides the APIs referenced by this source and resolve
+its source dependencies too. The current manifest is not a standalone crates.io
+installation recipe; do not substitute a released version without checking API
+compatibility. Commit the resulting lockfile for your own build.
 
-Only the portable `.node` files under `prebuilds/` enter the npm package;
-`native/`, receipts and the private sync setup are excluded.
-These checks inspect library headers and preparation metadata; they do not prove
-runtime or OS ABI compatibility. Build Linux binaries on the oldest supported
-glibc environment and validate each FreeBSD build on its supported OS version.
-
-### FreeBSD x64 cross preparation
-
-On a Linux x64 build host with Docker and the project's matching Rust toolchain:
+For a local addon on macOS arm64 or Linux x64 with glibc:
 
 ```sh
-rustup target add x86_64-unknown-freebsd
-scripts/prepare-freebsd.sh
+npm run build
+# Or build a debug addon:
+npm run build -- debug
 ```
 
-This uses `scripts/publish.sh --prepare --target x86_64-unknown-freebsd` inside
-a Debian builder with the official, checksum-verified FreeBSD 14.4-RELEASE
-amd64 sysroot. Rust's matching LLD links the addon. Compilation runs without
-network access, using a read-only registry cache fetched by the host. Source
-and toolchain mounts are read-only; only build caches and `prebuilds/` are
-writable. Cargo's existing path dependencies must be available. Node-API 8 and
-the portable `x86-64` CPU baseline remain unchanged.
+This stages a local binary under `native/<platform>/orbit.node`. It does not
+prepare portable release artifacts. The helper currently accepts those two build
+hosts; the release preparation tool supports the five targets listed below.
 
-The build requires a glibc-compatible Linux Rust toolchain. Image setup uses
-Docker's default build network; installations without a bridge can set
-`ORBIT_FREEBSD_BUILD_NETWORK=host` for that setup step. The compilation container
-still uses `--network none`. `ORBIT_FREEBSD_CACHE` selects a separate cache
-directory; `CARGO_BUILD_JOBS` controls build parallelism and the container CPU
-limit (default 4).
+To build and inspect the application-owned addon example:
 
-Cross preparation produces a FreeBSD artifact and receipt, not a FreeBSD
-execution result. Validate it on an actual supported FreeBSD runtime before
-release. A Linux/System V ELF is rejected as a FreeBSD artifact even when its
-architecture matches. Changes to the preparation scripts change the source
-digest, so all targets must be prepared from those same updated sources.
+```sh
+cargo build --workspace --all-features
+# macOS:
+cp target/debug/liborbit_js_example_addon.dylib target/debug/example.node
+# Linux or FreeBSD: copy liborbit_js_example_addon.so instead.
+node examples/rust-addon/check.js
+```
 
-### HTTP exchange completion
+If you set `CARGO_TARGET_DIR`, use that output directory in the copy command and
+place the result at `target/debug/example.node`, where the example loads it.
+The check loads your Rust function and Orbit classes without joining a fleet.
+`node examples/rust-addon/app.js` serves the greeting once an edge is configured.
 
-Completing a response releases both native stream halves, including unread
-request input. A pending input read is woken through the exchange's cancellation
-signal before its half is released. Keeping a JavaScript wrapper alive does not
-keep a completed HTTP exchange's stream slot claimed; reuse does not depend on
-garbage collection. Message sessions retain their separate close handshake.
+Run the JavaScript tests with `npm test`. The Rust library can also be embedded
+without Node-API by leaving its optional `napi` feature disabled.
+
+## Customize and publish your own npm package
+
+Fork this source and choose your own npm package name and version in
+`package.json`. Update descriptions, ownership metadata and import examples for
+your package. Edit `npm/README.md` for its users. Keep this root README focused
+on source development. If you change the native addon, retain Orbit's exports
+and add your application exports to the addon you build.
+
+The default release includes these prebuilds:
+
+| Package target | Rust target |
+| --- | --- |
+| `darwin-arm64` | `aarch64-apple-darwin` |
+| `linux-x64-gnu` | `x86_64-unknown-linux-gnu` |
+| `linux-arm64-gnu` | `aarch64-unknown-linux-gnu` |
+| `freebsd-x64` | `x86_64-unknown-freebsd` |
+| `freebsd-arm64` | `aarch64-unknown-freebsd` |
+
+After finishing your source and package metadata, prepare each target on a
+suitable build host:
+
+```sh
+bash scripts/publish.sh --prepare
+# A cross build requires an installed target, linker and target sysroot:
+bash scripts/publish.sh --prepare --target x86_64-unknown-freebsd
+```
+
+Preparation builds a release addon with a portable CPU baseline and writes
+`prebuilds/<platform>/orbit.node` plus a `release.json` receipt. Collect each
+matching pair into the release checkout. Keep all build hosts on identical
+package metadata and release inputs. Changing those inputs invalidates existing
+receipts; prepare them again. Local development binaries under `native/` are
+kept separate from release artifacts.
+
+The scripts validate the target binary header, source digest and checksum for
+all declared targets. This does not replace loading and testing each binary on
+its intended operating system. If your fork supports a different target set,
+update `native.js`, the explicit `package.json` file list and the release tests
+together before preparing it.
+
+Check the assembled release, then inspect the npm publication preview:
+
+```sh
+npm run check:package
+bash scripts/publish.sh --dry-run
+```
+
+Authenticate with npm using an account authorized for **your package name**.
+Once the preview is correct, publish explicitly:
+
+```sh
+bash scripts/publish.sh --publish
+```
+
+The script checks the prepared targets, copies only the explicit package file
+list into a temporary directory, and installs `npm/README.md` there as the
+package's `README.md`. It removes source-only npm scripts from that package and
+cleans the temporary directory after success or failure. The repository README
+is never replaced. Direct `npm pack` and `npm publish` from the source checkout
+are blocked by lifecycle hooks; use the release script so the correct README
+and checks are applied.
+
+Native receipts, build scripts and local notes are excluded from the npm
+package. Keep credentials and environment-specific release configuration in
+ignored local files; do not place them in either public README.
+
+MIT licensed.

@@ -2,7 +2,8 @@
 
 This unpublished workspace member adds `greeting` in Rust alongside Orbit's
 bindings. Both are loaded from one `.node` file. It uses the local `orbit-js`
-library while developing; that library consumes Claviron from crates.io.
+library while developing. First configure the compatible Claviron source
+dependency as described in the [repository build guide](../../README.md#build-from-source).
 
 From the repository root on macOS:
 
@@ -12,7 +13,7 @@ cp target/debug/liborbit_js_example_addon.dylib target/debug/example.node
 node examples/rust-addon/check.js
 ```
 
-On Linux, copy `target/debug/liborbit_js_example_addon.so` instead. A custom
+On Linux or FreeBSD, copy `target/debug/liborbit_js_example_addon.so` instead. A custom
 addon is built on its target platform; unsupported prebuilt platforms do not
 prevent the application from explicitly building its own module.
 

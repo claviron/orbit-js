@@ -11,6 +11,8 @@ Usage: scripts/publish.sh --prepare [--target RUST_TARGET] | --dry-run | --publi
 --dry-run  Require all five prepared targets and run npm publish --dry-run.
 --publish  Require all five prepared targets and publish to npm.
 
+The package uses npm/README.md; the repository README stays unchanged.
+
 No action is selected by default. Prepare each target on its own host, then
 use scripts/sync.sh to collect its .node and release.json before publishing.
 HELP

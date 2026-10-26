@@ -4,6 +4,7 @@
 /.idea
 *.md
 !README.md
+!npm/README.md
 /AGENTS.local.md
 
 /native/*/release.json

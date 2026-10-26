@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nativeTarget, nativeTargets } from "../native.js";
+import { withPackage } from "./package.js";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -46,7 +47,7 @@ export async function sourceDigest(root = repository) {
   }
   for (const path of ["package.json", "Cargo.toml", "Cargo.lock", "addon/Cargo.toml",
     "addon/build.rs", "index.js", "binding.js", "session.js", "framework.js", "native.js",
-    "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh",
+    "scripts/release.js", "scripts/package.js", "scripts/stage-native.js", "scripts/publish.sh",
     "scripts/prepare-freebsd.sh", "scripts/freebsd/Dockerfile",
     "scripts/freebsd/cc", "scripts/lib/cargo.sh"]) {
     await include(path);
@@ -153,7 +154,9 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     }
     if (action === "--prepare") await prepare(cross ? extra[1] : undefined);
     else if (!await checkPackage()) process.exitCode = 1;
-    else run("npm", ["publish", "--access", "public", ...(action === "--dry-run" ? ["--dry-run"] : [])]);
+    else await withPackage(repository, (cwd) => {
+      run("npm", ["publish", "--access", "public", ...(action === "--dry-run" ? ["--dry-run"] : [])], { cwd });
+    });
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

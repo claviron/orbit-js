@@ -1,6 +1,6 @@
 {
   "name": "@claviron/orbit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Serve a Deno, Node or Bun application behind a Claviron edge over Orbit Link",
   "type": "module",
   "main": "index.js",
@@ -25,8 +25,8 @@
     "build": "bash scripts/build-native.sh",
     "test": "node --test tests/*.test.js",
     "check:package": "node scripts/check-package.js",
-    "prepack": "npm run check:package",
-    "prepublishOnly": "npm run check:package"
+    "prepack": "node scripts/package.js",
+    "prepublishOnly": "node scripts/package.js"
   },
   "publishConfig": { "access": "public" },
   "license": "MIT"

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { nativeTarget, nativeTargets } from "../native.js";
 import { inspectPackage, sourceDigest, validateBinary } from "../scripts/release.js";
+import { withPackage } from "../scripts/package.js";
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -30,16 +31,19 @@ function binary(target) {
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "orbit-release-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const directory of ["src", "addon/src", "scripts/lib", "scripts/freebsd"]) {
+  for (const directory of ["src", "addon/src", "scripts/lib", "scripts/freebsd", "npm"]) {
     await mkdir(join(root, directory), { recursive: true });
   }
-  for (const file of ["native.js", "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh", "scripts/sync.js", "scripts/lib/cargo.sh", "scripts/prepare-freebsd.sh", "scripts/freebsd/Dockerfile", "scripts/freebsd/cc"]) {
+  for (const file of ["native.js", "scripts/package.js", "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh", "scripts/sync.js", "scripts/lib/cargo.sh", "scripts/prepare-freebsd.sh", "scripts/freebsd/Dockerfile", "scripts/freebsd/cc"]) {
     await copyFile(join(repository, file), join(root, file));
   }
   for (const file of ["Cargo.toml", "Cargo.lock", "addon/Cargo.toml", "addon/build.rs", "src/lib.rs", "addon/src/lib.rs", "index.js", "binding.js", "session.js", "framework.js"]) {
     await writeFile(join(root, file), "fixture\n");
   }
-  await writeFile(join(root, "package.json"), JSON.stringify({ name: "example-addon", version: "1.0.0", type: "module" }));
+  const published = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
+  await writeFile(join(root, "package.json"), JSON.stringify({ ...published, name: "example-addon", version: "1.0.0" }));
+  await writeFile(join(root, "README.md"), "Repository build and customization guide\n");
+  await writeFile(join(root, "npm/README.md"), "Consumer installation guide\n");
   return root;
 }
 
@@ -104,8 +108,10 @@ writeFileSync(join(directory, target.includes('apple') ? 'liborbit_js_addon.dyli
 `);
   const npm = join(commands, "npm");
   await writeFile(npm, `#!${process.execPath}\n` + `
-import { appendFileSync } from 'node:fs';
-appendFileSync(process.env.COMMAND_LOG, JSON.stringify({ command: 'npm', args: process.argv.slice(2) }) + '\\n');
+import { appendFileSync, readFileSync } from 'node:fs';
+const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+appendFileSync(process.env.COMMAND_LOG, JSON.stringify({ command: 'npm', args: process.argv.slice(2), cwd: process.cwd(), readme: readFileSync('README.md', 'utf8'), scripts: manifest.scripts ?? null }) + '\\n');
+if (process.env.FAIL_NPM) process.exit(1);
 `);
   await chmod(cargo, 0o755);
   await chmod(npm, 0o755);
@@ -141,10 +147,22 @@ appendFileSync(process.env.COMMAND_LOG, JSON.stringify({ command: 'npm', args: p
   calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(calls[1].flags, "-C\x1ftarget-cpu=x86-64");
   assert.ok(calls[1].args.includes("x86_64-unknown-freebsd"));
-  assert.deepEqual(calls.slice(2), [
+  assert.deepEqual(calls.slice(2).map(({ command, args }) => ({ command, args })), [
     { command: "npm", args: ["publish", "--access", "public", "--dry-run"] },
     { command: "npm", args: ["publish", "--access", "public"] },
   ]);
+  const failed = spawnSync("bash", [join(root, "scripts/publish.sh"), "--publish"], {
+    env: { ...env, FAIL_NPM: "1" }, encoding: "utf8",
+  });
+  assert.equal(failed.status, 1);
+  calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
+  for (const call of calls.slice(2)) {
+    assert.notEqual(call.cwd, root);
+    assert.equal(call.readme, "Consumer installation guide\n");
+    assert.equal(call.scripts, null);
+    await assert.rejects(readFile(join(call.cwd, "README.md")), { code: "ENOENT" });
+  }
+  assert.equal(await readFile(join(root, "README.md"), "utf8"), "Repository build and customization guide\n");
 });
 
 
@@ -212,17 +230,48 @@ test("npm package contains portable prebuilds and excludes local native files an
   }
   await mkdir(join(root, "prebuilds", "unrecognized"), { recursive: true });
   await writeFile(join(root, "prebuilds", "unrecognized", "orbit.node"), "must not publish");
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", join(root, "npm-cache")], {
+  await writeFile(join(root, "ARCHITECTURE.local.md"), "Private operator notes\n");
+  await withPackage(root, async (stage) => {
+    const result = spawnSync("npm", ["pack", "--json", "--cache", join(root, "npm-cache")], {
+      cwd: stage, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const packed = JSON.parse(result.stdout);
+    // npm 12 keys JSON results by package name; older versions return an array.
+    const entry = Object.values(packed)[0];
+    const files = entry.files.map((file) => file.path);
+    for (const target of Object.keys(nativeTargets)) assert.ok(files.includes(`prebuilds/${target}/orbit.node`));
+    assert.ok(!files.some((file) => file.startsWith("native/")));
+    assert.ok(!files.some((file) => file.endsWith("release.json")));
+    assert.ok(!files.some((file) => file.includes("sync")));
+    assert.ok(!files.some((file) => file.includes("unrecognized")));
+    assert.ok(!files.some((file) => file.endsWith("local.md") || file.startsWith("scripts/") || file.startsWith("npm/")));
+    assert.equal(files.filter((file) => file.endsWith(".node")).length, 5);
+    const extracted = spawnSync("tar", ["-xOf", join(stage, entry.filename), "package/README.md"], { encoding: "utf8" });
+    assert.equal(extracted.status, 0, extracted.stderr);
+    assert.equal(extracted.stdout, await readFile(join(root, "npm/README.md"), "utf8"));
+  });
+  assert.equal(await readFile(join(root, "README.md"), "utf8"), "Repository build and customization guide\n");
+});
+
+test("direct source packaging refuses to publish the repository README", async (t) => {
+  const root = await fixture(t);
+  const result = spawnSync("npm", ["pack", "--dry-run", "--cache", join(root, "npm-cache")], {
     cwd: root, encoding: "utf8",
   });
-  assert.equal(result.status, 0, result.stderr);
-  const packed = JSON.parse(result.stdout);
-  // npm 12 keys JSON results by package name; older versions return an array.
-  const files = Object.values(packed)[0].files.map((file) => file.path);
-  for (const target of Object.keys(nativeTargets)) assert.ok(files.includes(`prebuilds/${target}/orbit.node`));
-  assert.ok(!files.some((file) => file.startsWith("native/")));
-  assert.ok(!files.some((file) => file.endsWith("release.json")));
-  assert.ok(!files.some((file) => file.includes("sync")));
-  assert.ok(!files.some((file) => file.includes("unrecognized")));
-  assert.equal(files.filter((file) => file.endsWith(".node")).length, 5);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Use scripts\/publish.sh/);
+});
+
+test("staging failures clean up and leave the repository README intact", async (t) => {
+  const root = await fixture(t);
+  for (const target of Object.keys(nativeTargets)) await prepared(root, target);
+  const readme = await readFile(join(root, "README.md"), "utf8");
+  let directory;
+  await assert.rejects(withPackage(root, async (stage) => {
+    directory = stage;
+    throw new Error("registry unavailable");
+  }), /registry unavailable/);
+  await assert.rejects(readFile(join(directory, "README.md")), { code: "ENOENT" });
+  assert.equal(await readFile(join(root, "README.md"), "utf8"), readme);
 });
