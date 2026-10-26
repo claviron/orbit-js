@@ -18,7 +18,9 @@ export function validateBinary(target, bytes) {
       bytes.readUInt32LE(4) === 0x0100000c && bytes.readUInt32LE(12) === 6;
   } else {
     const machine = target.includes("arm64") ? 183 : 62;
-    const osabis = target.startsWith("freebsd-") ? [0, 9] : [0, 3];
+    // System V (0) is ambiguous: Linux addons commonly use it. Require the
+    // FreeBSD ABI marker rather than accepting a Linux ELF as a cross build.
+    const osabis = target.startsWith("freebsd-") ? [9] : [0, 3];
     valid = bytes.length >= 64 &&
       bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) &&
       bytes[4] === 2 && bytes[5] === 1 && osabis.includes(bytes[7]) &&
@@ -44,7 +46,9 @@ export async function sourceDigest(root = repository) {
   }
   for (const path of ["package.json", "Cargo.toml", "Cargo.lock", "addon/Cargo.toml",
     "addon/build.rs", "index.js", "binding.js", "session.js", "framework.js", "native.js",
-    "scripts/release.js", "scripts/stage-native.js"]) {
+    "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh",
+    "scripts/prepare-freebsd.sh", "scripts/freebsd/Dockerfile",
+    "scripts/freebsd/cc", "scripts/lib/cargo.sh"]) {
     await include(path);
   }
   await directory("src");
@@ -108,8 +112,10 @@ function run(command, args, options = {}) {
   if (result.status !== 0) throw new Error(`${command} failed (${result.signal ?? result.status})`);
 }
 
-async function prepare() {
-  const target = nativeTarget();
+async function prepare(tripleOverride) {
+  const target = tripleOverride === undefined ? nativeTarget() :
+    Object.keys(nativeTargets).find((key) => nativeTargets[key] === tripleOverride);
+  if (!target) throw new Error(`Unsupported preparation target: ${tripleOverride}`);
   const triple = nativeTargets[target];
   const cpu = cpuFor(target);
   const context = await releaseContext();
@@ -141,10 +147,11 @@ export async function checkPackage(root = repository) {
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [action, ...extra] = process.argv.slice(2);
-    if (extra.length || !["--prepare", "--publish", "--dry-run"].includes(action)) {
-      throw new Error("Use scripts/publish.sh --prepare | --dry-run | --publish");
+    const cross = action === "--prepare" && extra.length === 2 && extra[0] === "--target";
+    if ((!cross && extra.length) || !["--prepare", "--publish", "--dry-run"].includes(action)) {
+      throw new Error("Use scripts/publish.sh --prepare [--target RUST_TARGET] | --dry-run | --publish");
     }
-    if (action === "--prepare") await prepare();
+    if (action === "--prepare") await prepare(cross ? extra[1] : undefined);
     else if (!await checkPackage()) process.exitCode = 1;
     else run("npm", ["publish", "--access", "public", ...(action === "--dry-run" ? ["--dry-run"] : [])]);
   } catch (error) {

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { nativeTarget, nativeTargets } from "../native.js";
-import { inspectPackage, sourceDigest } from "../scripts/release.js";
+import { inspectPackage, sourceDigest, validateBinary } from "../scripts/release.js";
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -30,10 +30,10 @@ function binary(target) {
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "orbit-release-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const directory of ["src", "addon/src", "scripts/lib"]) {
+  for (const directory of ["src", "addon/src", "scripts/lib", "scripts/freebsd"]) {
     await mkdir(join(root, directory), { recursive: true });
   }
-  for (const file of ["native.js", "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh", "scripts/sync.js", "scripts/lib/cargo.sh"]) {
+  for (const file of ["native.js", "scripts/release.js", "scripts/stage-native.js", "scripts/publish.sh", "scripts/sync.js", "scripts/lib/cargo.sh", "scripts/prepare-freebsd.sh", "scripts/freebsd/Dockerfile", "scripts/freebsd/cc"]) {
     await copyFile(join(repository, file), join(root, file));
   }
   for (const file of ["Cargo.toml", "Cargo.lock", "addon/Cargo.toml", "addon/build.rs", "src/lib.rs", "addon/src/lib.rs", "index.js", "binding.js", "session.js", "framework.js"]) {
@@ -42,6 +42,12 @@ async function fixture(t) {
   await writeFile(join(root, "package.json"), JSON.stringify({ name: "example-addon", version: "1.0.0", type: "module" }));
   return root;
 }
+
+test("FreeBSD preparation rejects an otherwise matching Linux x64 ELF", () => {
+  assert.throws(() => validateBinary("freebsd-x64", binary("linux-x64-gnu")), /platform/);
+  validateBinary("freebsd-x64", binary("freebsd-x64"));
+  assert.throws(() => validateBinary("linux-x64-gnu", binary("freebsd-x64")), /platform/);
+});
 
 async function prepared(root, target) {
   const bytes = binary(target);
@@ -93,7 +99,8 @@ appendFileSync(process.env.COMMAND_LOG, JSON.stringify({ command: 'cargo', args:
 const target = process.argv[process.argv.indexOf('--target') + 1];
 const directory = join(process.env.CARGO_TARGET_DIR, target, 'release');
 mkdirSync(directory, { recursive: true });
-writeFileSync(join(directory, process.platform === 'darwin' ? 'liborbit_js_addon.dylib' : 'liborbit_js_addon.so'), Buffer.from(${JSON.stringify([...binary(nativeTarget())])}));
+const binaries = ${JSON.stringify(Object.fromEntries(Object.entries(nativeTargets).map(([key, triple]) => [triple, [...binary(key)]])))};
+writeFileSync(join(directory, target.includes('apple') ? 'liborbit_js_addon.dylib' : 'liborbit_js_addon.so'), Buffer.from(binaries[target]));
 `);
   const npm = join(commands, "npm");
   await writeFile(npm, `#!${process.execPath}\n` + `
@@ -118,13 +125,23 @@ appendFileSync(process.env.COMMAND_LOG, JSON.stringify({ command: 'npm', args: p
   assert.equal(calls[0].command, "cargo");
   assert.equal(calls[0].flags, `-C\x1ftarget-cpu=${process.arch === "arm64" ? "generic" : "x86-64"}`);
   assert.ok(calls[0].args.includes("--release"));
+  const cross = invoke("--prepare", "--target", "x86_64-unknown-freebsd");
+  assert.equal(cross.status, 0, cross.stderr);
+  const crossReceipt = JSON.parse(await readFile(join(root, "prebuilds/freebsd-x64/release.json"), "utf8"));
+  assert.equal(crossReceipt.target, "x86_64-unknown-freebsd");
+  assert.equal(crossReceipt.cpu, "x86-64");
+  assert.equal(crossReceipt.source, await sourceDigest(root));
+  assert.equal(invoke("--prepare", "--target", "unsupported").status, 1);
+  assert.equal(invoke("--publish", "--target", "x86_64-unknown-freebsd").status, 2);
   assert.equal(invoke("--publish").status, 1);
   assert.equal(invoke("--dry-run").status, 1);
   for (const target of Object.keys(nativeTargets)) await prepared(root, target);
   assert.equal(invoke("--dry-run").status, 0);
   assert.equal(invoke("--publish").status, 0);
   calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(calls.slice(1), [
+  assert.equal(calls[1].flags, "-C\x1ftarget-cpu=x86-64");
+  assert.ok(calls[1].args.includes("x86_64-unknown-freebsd"));
+  assert.deepEqual(calls.slice(2), [
     { command: "npm", args: ["publish", "--access", "public", "--dry-run"] },
     { command: "npm", args: ["publish", "--access", "public"] },
   ]);
@@ -199,7 +216,9 @@ test("npm package contains portable prebuilds and excludes local native files an
     cwd: root, encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
-  const files = JSON.parse(result.stdout)[0].files.map((file) => file.path);
+  const packed = JSON.parse(result.stdout);
+  // npm 12 keys JSON results by package name; older versions return an array.
+  const files = Object.values(packed)[0].files.map((file) => file.path);
   for (const target of Object.keys(nativeTargets)) assert.ok(files.includes(`prebuilds/${target}/orbit.node`));
   assert.ok(!files.some((file) => file.startsWith("native/")));
   assert.ok(!files.some((file) => file.endsWith("release.json")));

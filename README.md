@@ -233,6 +233,36 @@ These checks inspect library headers and preparation metadata; they do not prove
 runtime or OS ABI compatibility. Build Linux binaries on the oldest supported
 glibc environment and validate each FreeBSD build on its supported OS version.
 
+### FreeBSD x64 cross preparation
+
+On a Linux x64 build host with Docker and the project's matching Rust toolchain:
+
+```sh
+rustup target add x86_64-unknown-freebsd
+scripts/prepare-freebsd.sh
+```
+
+This uses `scripts/publish.sh --prepare --target x86_64-unknown-freebsd` inside
+a Debian builder with the official, checksum-verified FreeBSD 14.4-RELEASE
+amd64 sysroot. Rust's matching LLD links the addon. Compilation runs without
+network access, using a read-only registry cache fetched by the host. Source
+and toolchain mounts are read-only; only build caches and `prebuilds/` are
+writable. Cargo's existing path dependencies must be available. Node-API 8 and
+the portable `x86-64` CPU baseline remain unchanged.
+
+The build requires a glibc-compatible Linux Rust toolchain. Image setup uses
+Docker's default build network; installations without a bridge can set
+`ORBIT_FREEBSD_BUILD_NETWORK=host` for that setup step. The compilation container
+still uses `--network none`. `ORBIT_FREEBSD_CACHE` selects a separate cache
+directory; `CARGO_BUILD_JOBS` controls build parallelism and the container CPU
+limit (default 4).
+
+Cross preparation produces a FreeBSD artifact and receipt, not a FreeBSD
+execution result. Validate it on an actual supported FreeBSD runtime before
+release. A Linux/System V ELF is rejected as a FreeBSD artifact even when its
+architecture matches. Changes to the preparation scripts change the source
+digest, so all targets must be prepared from those same updated sources.
+
 ### HTTP exchange completion
 
 Completing a response releases both native stream halves, including unread
