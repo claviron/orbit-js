@@ -7,7 +7,9 @@
 //! cargo run --example control -- <fleet> <name> <command> [<payload>]
 //! ```
 
-use claviron::orbit::transport::{ControlCommand, ControlTarget, TransportClient};
+use claviron::orbit::transport::{
+    ControlCommand, ControlTarget, TransportClient,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,8 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = arguments.next().ok_or(usage)?;
     let payload = arguments.next().unwrap_or_default();
 
-    let target = matches!(command.as_str(), "start" | "stop" | "restart")
-        .then(|| ControlTarget { runtime: "js".to_owned(), name: name.clone() });
+    let target =
+        matches!(command.as_str(), "start" | "stop" | "restart").then(|| {
+            ControlTarget { runtime: "js".to_owned(), name: name.clone() }
+        });
     let client = TransportClient::join(&fleet, "orbit-js-control", 1)?;
     let sent = client.command(&ControlCommand {
         application: name.clone(),

@@ -25,8 +25,6 @@ use claviron::app::{
 };
 use claviron::orbit::service::{FleetMember, FleetMemberRole};
 use claviron::orbit::transport::TransportSegment;
-use napi::bindgen_prelude::Buffer;
-use napi_derive::napi;
 use tokio::sync::mpsc;
 
 use crate::RUNTIME;
@@ -36,7 +34,6 @@ use crate::RUNTIME;
 pub(crate) const LIFECYCLE_TOPIC: &str = "orbit-js.lifecycle.v1";
 
 /// Something the edge said, for JavaScript.
-#[napi(object)]
 pub struct ControlEvent {
     /// `lifecycle`, `command` or `shutdown`.
     pub kind: String,
@@ -44,7 +41,7 @@ pub struct ControlEvent {
     pub action: Option<String>,
     /// For `command`: the application-defined name.
     pub name: Option<String>,
-    pub payload: Option<Buffer>,
+    pub payload: Option<Vec<u8>>,
     /// For `shutdown`: the edge that is shutting down.
     pub edge: Option<String>,
 }
@@ -136,7 +133,7 @@ impl Lifecycle {
             kind: "command".to_owned(),
             action: None,
             name: Some(name),
-            payload: Some(payload.into()),
+            payload: Some(payload),
             edge: None,
         });
     }

@@ -46,7 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = TransportClient::join(&fleet, "orbit-js-edge", 1)?;
     if !client.serves(&name) {
         client.leave();
-        return Err(format!("nothing serves '{name}' in fleet '{fleet}'").into());
+        return Err(
+            format!("nothing serves '{name}' in fleet '{fleet}'").into()
+        );
     }
     let pending = client.send(&name, request, body.is_some())?;
     let (mut request_body, mut response_body, reply) = pending.split();

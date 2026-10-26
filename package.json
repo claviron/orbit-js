@@ -5,12 +5,17 @@
   "type": "module",
   "main": "index.js",
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
+    "./binding": "./binding.js"
   },
-  "files": ["index.js", "framework.js", "orbit.node"],
+  "files": ["index.js", "binding.js", "session.js", "framework.js", "native.js", "native/**/*.node", "README.md"],
   "scripts": {
-    "build": "sh scripts/build.sh"
+    "build": "sh scripts/build.sh",
+    "test": "node --test tests/*.test.js",
+    "check:package": "node scripts/check-package.js",
+    "prepack": "npm run check:package"
   },
+  "publishConfig": { "access": "public" },
   "license": "MIT",
   "private": true
 }

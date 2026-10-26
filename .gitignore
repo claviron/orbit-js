@@ -2,3 +2,6 @@
 *.node
 /node_modules
 /.idea
+*.md
+!README.md
+/AGENTS.local.md

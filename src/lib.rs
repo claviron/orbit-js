@@ -2,17 +2,40 @@
 //!
 //! The process takes a lane in its fleet's Link segment under a name, the way
 //! a Claviron runner does, and the edge writes HTTP exchanges into it. This
-//! module reads them on its own Tokio runtime — the lane's bell wakes the
+//! library reads them on its caller's Tokio runtime — the lane's bell wakes the
 //! reactor, no thread is parked and nothing polls — and hands each to
 //! JavaScript as a promise. The application answers with a status, headers
 //! and a body; the head goes back to the edge worker that asked, the body
 //! through the exchange's stream slot.
+//!
+//! The optional `napi` adapter runs on the addon's Node-API Tokio runtime.
+//! It translates JavaScript values without owning a second transport engine.
 
 use std::sync::{Arc, Mutex};
 
 mod cells;
+mod error;
 mod events;
+mod http;
 mod lifecycle;
+mod session;
+use ErrorKind as Status;
+pub use cells::{Cell, CellValue, Cells};
+pub use claviron::orbit::transport::Message;
+pub use error::{Error, ErrorKind, Result};
+pub use events::DeliveredEvent;
+pub use lifecycle::ControlEvent;
+
+#[cfg(feature = "napi")]
+mod bindings;
+
+#[cfg(feature = "napi")]
+#[doc(hidden)]
+pub mod __private {
+    pub use napi;
+    pub use napi_derive;
+    pub use serde_json;
+}
 
 use claviron::orbit::transport::{
     ControlCommand, Exchange as ExchangeFrame, ExchangeReply, FrameKind,
@@ -23,10 +46,7 @@ use claviron::orbitive::link::InboxReceiver;
 use claviron::orbitive::shm::LaneHold;
 use claviron::orbitive::stream::{ReadHalf, WriteHalf};
 use claviron::orbitive::{Fleet, NodeId};
-use napi::bindgen_prelude::Buffer;
-use napi::{Error, Result, Status};
-use napi_derive::napi;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 /// What a lane says serves its name, so the edge's directory reads `js`.
 pub(crate) const RUNTIME: &str = "js";
@@ -39,7 +59,6 @@ const INCARNATION: u64 = 1;
 /// buffer bounds what is there to take.
 const READ_CHUNK: usize = 64 * 1024;
 
-#[napi(object)]
 pub struct JoinOptions {
     /// The Link fleet the edge routes to.
     pub fleet: String,
@@ -52,7 +71,6 @@ pub struct JoinOptions {
 }
 
 /// This process's place in a Link fleet.
-#[napi]
 pub struct Link {
     segment: Arc<TransportSegment>,
     bodies: Arc<TransportBodies>,
@@ -76,7 +94,6 @@ pub struct Link {
 }
 
 /// Take a lane in `fleet` under `name` and start reading it.
-#[napi]
 pub async fn join(options: JoinOptions) -> Result<Link> {
     let segment =
         Arc::new(TransportSegment::for_fleet(&options.fleet).map_err(failure)?);
@@ -104,7 +121,7 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
     let (cells, cells_unavailable) =
         match cells::Cells::attach(Arc::clone(&fleet)) {
             Ok(cells) => (Some(cells), None),
-            Err(error) => (None, Some(error.reason.clone())),
+            Err(error) => (None, Some(error.to_string())),
         };
     let (lifecycle, controls) = lifecycle::Lifecycle::new(
         Arc::clone(&segment),
@@ -137,16 +154,13 @@ pub async fn join(options: JoinOptions) -> Result<Link> {
     })
 }
 
-#[napi]
 impl Link {
     /// The lane this process took; its address in the fleet.
-    #[napi(getter)]
     pub fn lane(&self) -> u32 {
         self.lane
     }
 
     /// The next request, or `null` once the link is closed.
-    #[napi]
     pub async fn next(&self) -> Result<Option<Exchange>> {
         let mut closed = self.closed.subscribe();
         if *closed.borrow_and_update() {
@@ -197,12 +211,6 @@ impl Link {
                 self.refuse(exchange, 503).await;
                 continue;
             }
-            if exchange.upgrade {
-                // WebSocket upgrades are not served yet: refuse rather than
-                // leave the edge waiting.
-                self.refuse(exchange, 501).await;
-                continue;
-            }
             return Exchange::new(
                 exchange,
                 Arc::clone(&self.segment),
@@ -214,7 +222,6 @@ impl Link {
 
     /// Stop being a target: release the lane, then its hold. Requests already
     /// taken may still be answered.
-    #[napi]
     pub async fn close(&self) {
         self.closed.send_replace(true);
         self.events.stop();
@@ -224,7 +231,6 @@ impl Link {
     }
 
     /// The fleet's cells, shared with every instance of this application.
-    #[napi(getter)]
     pub fn cells(&self) -> Result<cells::Cells> {
         self.cells.clone().ok_or_else(|| {
             Error::new(
@@ -240,7 +246,6 @@ impl Link {
     /// Receive events on these topics, from the other instances of this
     /// application and from across the Link. Subscribing is what tells the
     /// edge's side to send them.
-    #[napi]
     pub fn subscribe(
         &self,
         topics: Vec<String>,
@@ -248,7 +253,6 @@ impl Link {
         self.events.subscribe(topics);
     }
 
-    #[napi]
     pub fn unsubscribe(
         &self,
         topics: Vec<String>,
@@ -258,7 +262,6 @@ impl Link {
 
     /// Publish an application event; returns its id. With `target`
     /// (`[runtime, name]`), only that application receives it.
-    #[napi]
     pub fn publish(
         &self,
         topic: String,
@@ -279,7 +282,6 @@ impl Link {
     }
 
     /// The next subscribed event, or `null` once the link is closed.
-    #[napi]
     pub async fn next_event(&self) -> Option<events::DeliveredEvent> {
         let mut closed = self.closed.subscribe();
         if *closed.borrow_and_update() {
@@ -294,7 +296,6 @@ impl Link {
 
     /// The next thing the edge said — a lifecycle change, a named command or
     /// an edge shutdown — or `null` once the link is closed.
-    #[napi]
     pub async fn next_control(&self) -> Option<lifecycle::ControlEvent> {
         let mut closed = self.closed.subscribe();
         if *closed.borrow_and_update() {
@@ -308,7 +309,6 @@ impl Link {
     }
 
     /// Whether the application is running (not stopped by the edge).
-    #[napi(getter)]
     pub fn running(&self) -> bool {
         self.lifecycle.running()
     }
@@ -357,7 +357,6 @@ impl Link {
 }
 
 /// One request and the means to answer it.
-#[napi]
 pub struct Exchange {
     segment: Arc<TransportSegment>,
     correlation: u64,
@@ -367,6 +366,9 @@ pub struct Exchange {
     url: String,
     headers: Vec<Vec<String>>,
     has_body: bool,
+    session_kind: Option<&'static str>,
+    http_version: &'static str,
+    session: std::sync::OnceLock<session::Session>,
     incoming: tokio::sync::Mutex<Option<ReadHalf>>,
     outgoing: tokio::sync::Mutex<Option<WriteHalf>>,
     replied: Mutex<bool>,
@@ -400,6 +402,15 @@ impl Exchange {
             })
             .collect();
         let url = url(&exchange, &headers);
+        let session_kind = exchange.upgrade.then_some(
+            if exchange.version
+                == claviron::orbit::transport::HttpVersion::Http3
+            {
+                "webtransport"
+            } else {
+                "websocket"
+            },
+        );
         Ok(Self {
             segment,
             correlation: exchange.correlation,
@@ -409,6 +420,9 @@ impl Exchange {
             url,
             headers,
             has_body: incoming.is_some(),
+            session_kind,
+            http_version: exchange.version.as_str(),
+            session: std::sync::OnceLock::new(),
             incoming: tokio::sync::Mutex::new(incoming),
             outgoing: tokio::sync::Mutex::new(outgoing),
             replied: Mutex::new(false),
@@ -435,57 +449,57 @@ impl Exchange {
     }
 }
 
-#[napi]
 impl Exchange {
-    #[napi(getter)]
     pub fn method(&self) -> String {
         self.method.clone()
     }
 
-    #[napi(getter)]
     pub fn url(&self) -> String {
         self.url.clone()
     }
 
     /// `[name, value]` pairs, in the order they arrived.
-    #[napi(getter)]
     pub fn headers(&self) -> Vec<Vec<String>> {
         self.headers.clone()
     }
 
     /// Whether the request has a body at all. Absent is not empty.
-    #[napi(getter)]
     pub fn has_body(&self) -> bool {
         self.has_body
     }
 
+    pub fn is_session(&self) -> bool {
+        self.session_kind.is_some()
+    }
+    pub fn session_kind(&self) -> Option<&'static str> {
+        self.session_kind
+    }
+    pub fn http_version(&self) -> &'static str {
+        self.http_version
+    }
+
     /// The next piece of the request body, or `null` at its end.
-    #[napi]
-    pub async fn read(&self) -> Result<Option<Buffer>> {
-        let mut held = self.incoming.lock().await;
-        let Some(incoming) = held.as_mut() else {
-            return Ok(None);
-        };
-        let mut aborted = self.aborted.subscribe();
-        if *aborted.borrow_and_update() {
-            return Err(abandoned());
-        }
-        let mut piece = vec![0u8; READ_CHUNK];
-        let read = tokio::select! {
-            read = incoming.read(&mut piece) => read.map_err(failure)?,
-            _ = aborted.changed() => return Err(abandoned()),
-        };
-        if read == 0 {
-            held.take();
-            return Ok(None);
-        }
-        piece.truncate(read);
-        Ok(Some(piece.into()))
+    pub async fn read(&self) -> Result<Option<Vec<u8>>> {
+        self.require_http()?;
+        http::read(&self.incoming, &self.aborted).await
     }
 
     /// Send the reply head to the edge worker that asked. Once only.
-    #[napi]
     pub fn respond(
+        &self,
+        status: u16,
+        headers: Vec<Vec<String>>,
+    ) -> Result<()> {
+        if self.is_session() && status < 300 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "use acceptSession to accept a message session",
+            ));
+        }
+        self.publish_head(status, headers)
+    }
+
+    fn publish_head(
         &self,
         status: u16,
         headers: Vec<Vec<String>>,
@@ -522,11 +536,11 @@ impl Exchange {
     }
 
     /// Write a piece of the reply body.
-    #[napi]
     pub async fn write(
         &self,
-        chunk: Buffer,
+        chunk: &[u8],
     ) -> Result<()> {
+        self.require_http()?;
         let mut held = self.outgoing.lock().await;
         let Some(outgoing) = held.as_mut() else {
             return Err(Error::new(
@@ -539,31 +553,136 @@ impl Exchange {
             return Err(abandoned());
         }
         tokio::select! {
-            written = outgoing.write_all(&chunk) => written.map_err(failure),
+            written = outgoing.write_all(chunk) => written.map_err(failure),
             _ = aborted.changed() => Err(abandoned()),
         }
     }
 
     /// Close the reply body; the edge sees its end.
-    #[napi]
     pub async fn end(&self) -> Result<()> {
+        self.require_http()?;
+        http::finish(&self.incoming, &self.outgoing, &self.aborted)
+            .await
+            .map_err(failure)
+    }
+
+    /// Abandon the exchange. Before a reply head the edge gets a 503 with an
+    /// empty body; after it, the body is cut, so the edge sees it unfinished.
+    /// Either way nothing on the edge is left waiting for this process.
+    pub async fn abort(&self) {
+        self.aborted.send_replace(true);
+        if let Some(session) = self.session.get() {
+            session.abort().await;
+            return;
+        }
+        if !self.refuse(503).await
+            && let Some(mut outgoing) = self.outgoing.lock().await.take()
+        {
+            outgoing.reset();
+        }
+    }
+
+    fn require_http(&self) -> Result<()> {
+        if self.is_session() {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "message sessions use the session API, not HTTP body IO",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Accept one Link message stream with an explicit text/binary byte limit.
+    /// Native H1/H2/H3 handshakes stay at the edge; 101 is the Link acknowledgment.
+    pub async fn accept_session(
+        &self,
+        max_message_bytes: u32,
+        headers: Vec<Vec<String>>,
+    ) -> Result<()> {
+        if !self.is_session() || max_message_bytes == 0 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "a session and a positive maxMessageBytes are required",
+            ));
+        }
+        let mut incoming = self.incoming.lock().await;
+        let mut outgoing = self.outgoing.lock().await;
+        if self.session.get().is_some() || *self.aborted.borrow() {
+            return Err(abandoned());
+        }
+        if incoming.is_none() || outgoing.is_none() {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "message session has no duplex slot",
+            ));
+        }
+        let session = session::Session::new(
+            incoming.take().unwrap(),
+            outgoing.take().unwrap(),
+            max_message_bytes,
+            self.aborted.clone(),
+        );
+        self.publish_head(101, headers)?;
+        self.session.set(session).map_err(|_| abandoned())?;
+        drop(outgoing);
+        drop(incoming);
+        // An abort may have observed the old raw halves before this transfer.
+        // The shared cancellation word closes that acceptance race too.
+        if *self.aborted.borrow() {
+            self.accepted_session()?.abort().await;
+            return Err(abandoned());
+        }
+        Ok(())
+    }
+
+    pub async fn reject_session(
+        &self,
+        status: u16,
+        headers: Vec<Vec<String>>,
+    ) -> Result<()> {
+        if !self.is_session() || !(300..=599).contains(&status) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "session rejection requires an HTTP error or redirect status",
+            ));
+        }
+        self.respond(status, headers)?;
+        self.incoming.lock().await.take();
         if let Some(mut outgoing) = self.outgoing.lock().await.take() {
             outgoing.shutdown().await.map_err(failure)?;
         }
         Ok(())
     }
 
-    /// Abandon the exchange. Before a reply head the edge gets a 503 with an
-    /// empty body; after it, the body is cut, so the edge sees it unfinished.
-    /// Either way nothing on the edge is left waiting for this process.
-    #[napi]
-    pub async fn abort(&self) {
-        self.aborted.send_replace(true);
-        if !self.refuse(503).await
-            && let Some(mut outgoing) = self.outgoing.lock().await.take()
-        {
-            outgoing.reset();
+    fn accepted_session(&self) -> Result<&session::Session> {
+        self.session.get().ok_or_else(|| {
+            Error::new(Status::InvalidArg, "session is not accepted")
+        })
+    }
+
+    pub async fn receive_message(&self) -> Result<Option<Message>> {
+        self.accepted_session()?.receive().await
+    }
+
+    pub async fn send_message(
+        &self,
+        message: &Message,
+    ) -> Result<()> {
+        if matches!(message, Message::Close { .. }) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "use closeSession for a close message",
+            ));
         }
+        self.accepted_session()?.send(message).await
+    }
+
+    pub async fn close_session(
+        &self,
+        code: u16,
+        reason: &str,
+    ) -> Result<()> {
+        self.accepted_session()?.close(code, reason).await
     }
 }
 

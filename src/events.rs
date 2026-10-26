@@ -6,24 +6,22 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::{Error, ErrorKind as Status, Result};
 use claviron::app::{
-    APPLICATION_EVENT_TOPIC, ApplicationEvent, ApplicationId,
-    ApplicationName, ApplicationRuntime, EventValue, link_routing_key,
+    APPLICATION_EVENT_TOPIC, ApplicationEvent, ApplicationId, ApplicationName,
+    ApplicationRuntime, EventValue, link_routing_key,
 };
 use claviron::orbit::transport::EDGE_RUNTIME;
 use claviron::orbit::{ApplicationEventLayout, FleetEventCodec};
+use claviron::orbitive::Fleet;
 use claviron::orbitive::events::FleetEventBus;
 use claviron::orbitive::link::{LinkEvents, LinkSegment, Routing};
-use claviron::orbitive::Fleet;
-use napi::{Error, Result, Status};
-use napi_derive::napi;
 use tokio::sync::mpsc;
 
 use crate::RUNTIME;
 use crate::lifecycle::{LIFECYCLE_TOPIC, Lifecycle};
 
 /// One event delivered to JavaScript.
-#[napi(object)]
 pub struct DeliveredEvent {
     pub id: String,
     pub topic: String,
@@ -77,7 +75,9 @@ impl Events {
         let driving = Arc::clone(&events.bridge);
         let forwarding = tokio::spawn(async move {
             if let Err(error) = driving.drive().await {
-                eprintln!("orbit-js: events stopped crossing the Link: {error}");
+                eprintln!(
+                    "orbit-js: events stopped crossing the Link: {error}"
+                );
             }
         });
         let reading = tokio::spawn(Arc::clone(&events).read_ring());
@@ -89,15 +89,21 @@ impl Events {
     /// on the ring's own readiness, never on an interval.
     async fn read_ring(self: Arc<Self>) {
         let ready = match self.bus.event_fd() {
-            Ok(fd) => match tokio::io::unix::AsyncFd::new(fd) {
+            // SAFETY: RingEventFd owns its readiness descriptor, keeps its
+            // identity fixed, and is moved into AsyncFd until deregistration.
+            Ok(fd) => match unsafe { tokio::io::unix::AsyncFd::register(fd) } {
                 Ok(ready) => ready,
                 Err(error) => {
-                    eprintln!("orbit-js: the event ring cannot wake this process: {error}");
+                    eprintln!(
+                        "orbit-js: the event ring cannot wake this process: {error}"
+                    );
                     return;
                 }
             },
             Err(error) => {
-                eprintln!("orbit-js: the event ring cannot wake this process: {error}");
+                eprintln!(
+                    "orbit-js: the event ring cannot wake this process: {error}"
+                );
                 return;
             }
         };
@@ -107,7 +113,9 @@ impl Events {
             for event in self.bus.poll(&mut cursor).events {
                 // This process delivered its own events when it published
                 // or accepted them.
-                if event.id.node() != own && event.topic == APPLICATION_EVENT_TOPIC {
+                if event.id.node() != own
+                    && event.topic == APPLICATION_EVENT_TOPIC
+                {
                     self.deliver(&event.payload);
                 }
             }
@@ -130,7 +138,9 @@ impl Events {
                 self.deliver(payload);
             }
             Ok(_) => {}
-            Err(error) => eprintln!("orbit-js: an event frame was refused: {error}"),
+            Err(error) => {
+                eprintln!("orbit-js: an event frame was refused: {error}")
+            }
         }
     }
 
@@ -212,18 +222,25 @@ impl Events {
         let Ok(event) = ApplicationEvent::decode_orbit(payload) else { return };
         if event.topic().as_str() == LIFECYCLE_TOPIC {
             let ours = event.target().is_some_and(|target| {
-                target.runtime().as_str() == RUNTIME && target.name().as_str() == self.name
+                target.runtime().as_str() == RUNTIME
+                    && target.name().as_str() == self.name
             });
             if ours && let EventValue::String(action) = event.payload() {
                 self.lifecycle.apply(&String::from_utf8_lossy(action));
             }
             return;
         }
-        if !self.topics.lock().expect("event topics").contains(event.topic().as_str()) {
+        if !self
+            .topics
+            .lock()
+            .expect("event topics")
+            .contains(event.topic().as_str())
+        {
             return;
         }
         if let Some(target) = event.target()
-            && (target.runtime().as_str() != RUNTIME || target.name().as_str() != self.name)
+            && (target.runtime().as_str() != RUNTIME
+                || target.name().as_str() != self.name)
         {
             return;
         }

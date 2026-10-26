@@ -2,25 +2,32 @@
 name = "orbit-js"
 version = "0.1.0"
 edition = "2024"
-publish = false
+publish = true
 description = "Serve a Deno, Node or Bun application behind a Claviron edge over Orbit Link"
 license = "MIT"
+repository = "https://github.com/claviron/orbit-js"
+include = ["/src/**", "/README.md", "!**/.DS_Store"]
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["rlib"]
+
+[workspace]
+members = ["addon", "examples/rust-addon"]
+resolver = "3"
+
+[features]
+default = []
+napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 claviron = { path = "../claviron", default-features = false, features = ["orbit", "application"] }
-napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
+napi = { version = "3", optional = true, default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
 serde_json = "1"
-napi-derive = "3"
-tokio = { version = "1", features = ["io-util", "sync", "rt", "macros"] }
+napi-derive = { version = "3", optional = true }
+tokio = { version = "1.54", features = ["io-util", "sync", "rt", "macros"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
-
-[build-dependencies]
-napi-build = "2"
 
 [profile.release]
 lto = "thin"

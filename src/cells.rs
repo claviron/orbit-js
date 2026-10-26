@@ -5,13 +5,11 @@
 
 use std::sync::Arc;
 
+use crate::{Error, ErrorKind as Status, Result};
 use claviron::orbitive::Fleet;
 use claviron::orbitive::cell::{
     CellId, Cells as FleetCells, Orbital, Text, TextId,
 };
-use napi::bindgen_prelude::Either4;
-use napi::{Error, Result, Status};
-use napi_derive::napi;
 
 #[derive(Clone)]
 enum Value {
@@ -22,10 +20,15 @@ enum Value {
 }
 
 /// What a cell holds, as JavaScript sees it.
-type Loaded = Either4<i64, f64, bool, String>;
+#[derive(Clone, Debug, PartialEq)]
+pub enum CellValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Text(String),
+}
 
 /// The fleet's cell table, opened once per process.
-#[napi]
 #[derive(Clone)]
 pub struct Cells {
     cells: Arc<FleetCells>,
@@ -37,29 +40,37 @@ impl Cells {
     }
 }
 
-#[napi]
 impl Cells {
-    #[napi]
-    pub fn int(&self, value: Option<i64>) -> Result<Cell> {
+    pub fn int(
+        &self,
+        value: Option<i64>,
+    ) -> Result<Cell> {
         let cell = self.cells.allocate(value.unwrap_or(0)).map_err(failure)?;
         Ok(Cell { value: Value::Int(cell) })
     }
 
-    #[napi]
-    pub fn float(&self, value: Option<f64>) -> Result<Cell> {
-        let cell = self.cells.allocate(value.unwrap_or(0.0)).map_err(failure)?;
+    pub fn float(
+        &self,
+        value: Option<f64>,
+    ) -> Result<Cell> {
+        let cell =
+            self.cells.allocate(value.unwrap_or(0.0)).map_err(failure)?;
         Ok(Cell { value: Value::Float(cell) })
     }
 
-    #[napi]
-    pub fn bool(&self, value: Option<bool>) -> Result<Cell> {
+    pub fn bool(
+        &self,
+        value: Option<bool>,
+    ) -> Result<Cell> {
         let cell =
             self.cells.allocate(value.unwrap_or(false)).map_err(failure)?;
         Ok(Cell { value: Value::Bool(cell) })
     }
 
-    #[napi]
-    pub fn string(&self, value: Option<String>) -> Result<Cell> {
+    pub fn string(
+        &self,
+        value: Option<String>,
+    ) -> Result<Cell> {
         let cell = self
             .cells
             .allocate_text(value.as_deref().unwrap_or(""))
@@ -69,8 +80,10 @@ impl Cells {
 
     /// Attach to a cell another process made, by the id it printed. A scalar
     /// id does not say its type; the cell does.
-    #[napi]
-    pub fn open(&self, id: String) -> Result<Cell> {
+    pub fn open(
+        &self,
+        id: String,
+    ) -> Result<Cell> {
         if id.starts_with("cell:") {
             let cell_id: CellId = id.parse().map_err(failure)?;
             let value = self
@@ -89,15 +102,12 @@ impl Cells {
 }
 
 /// A handle to one cell. The value lives in shared memory, not here.
-#[napi]
 pub struct Cell {
     value: Value,
 }
 
-#[napi]
 impl Cell {
     /// The id another process opens the same cell by.
-    #[napi(getter)]
     pub fn id(&self) -> String {
         match &self.value {
             Value::Int(cell) => cell.id().to_string(),
@@ -108,7 +118,6 @@ impl Cell {
     }
 
     /// `int`, `float`, `bool` or `string`.
-    #[napi(getter)]
     pub fn kind(&self) -> String {
         match &self.value {
             Value::Int(_) => "int",
@@ -119,27 +128,34 @@ impl Cell {
         .to_owned()
     }
 
-    #[napi]
-    pub fn get(&self) -> Result<Loaded> {
+    pub fn get(&self) -> Result<CellValue> {
         Ok(match &self.value {
-            Value::Int(cell) => Either4::A(cell.load().map_err(failure)?),
-            Value::Float(cell) => Either4::B(cell.load().map_err(failure)?),
-            Value::Bool(cell) => Either4::C(cell.load().map_err(failure)?),
-            Value::Text(cell) => Either4::D(cell.load().map_err(failure)?),
+            Value::Int(cell) => CellValue::Int(cell.load().map_err(failure)?),
+            Value::Float(cell) => {
+                CellValue::Float(cell.load().map_err(failure)?)
+            }
+            Value::Bool(cell) => CellValue::Bool(cell.load().map_err(failure)?),
+            Value::Text(cell) => CellValue::Text(cell.load().map_err(failure)?),
         })
     }
 
-    #[napi]
-    pub fn set(&self, value: Loaded) -> Result<()> {
+    pub fn set(
+        &self,
+        value: CellValue,
+    ) -> Result<()> {
         match (&self.value, value) {
-            (Value::Int(cell), Either4::A(value)) => cell.store(value),
-            (Value::Int(cell), Either4::B(value)) if value.fract() == 0.0 => {
+            (Value::Int(cell), CellValue::Int(value)) => cell.store(value),
+            (Value::Int(cell), CellValue::Float(value))
+                if value.fract() == 0.0 =>
+            {
                 cell.store(value as i64)
             }
-            (Value::Float(cell), Either4::A(value)) => cell.store(value as f64),
-            (Value::Float(cell), Either4::B(value)) => cell.store(value),
-            (Value::Bool(cell), Either4::C(value)) => cell.store(value),
-            (Value::Text(cell), Either4::D(value)) => {
+            (Value::Float(cell), CellValue::Int(value)) => {
+                cell.store(value as f64)
+            }
+            (Value::Float(cell), CellValue::Float(value)) => cell.store(value),
+            (Value::Bool(cell), CellValue::Bool(value)) => cell.store(value),
+            (Value::Text(cell), CellValue::Text(value)) => {
                 return cell.store(&value).map_err(failure);
             }
             _ => {
@@ -153,14 +169,16 @@ impl Cell {
     }
 
     /// Add atomically and return the value after; int and float cells.
-    #[napi]
-    pub fn add(&self, by: f64) -> Result<Loaded> {
+    pub fn add(
+        &self,
+        by: f64,
+    ) -> Result<CellValue> {
         match &self.value {
             Value::Int(cell) if by.fract() == 0.0 => {
-                cell.fetch_add(by as i64).map(Either4::A).map_err(failure)
+                cell.fetch_add(by as i64).map(CellValue::Int).map_err(failure)
             }
             Value::Float(cell) => {
-                cell.fetch_add(by).map(Either4::B).map_err(failure)
+                cell.fetch_add(by).map(CellValue::Float).map_err(failure)
             }
             _ => Err(Error::new(
                 Status::InvalidArg,
@@ -170,8 +188,10 @@ impl Cell {
     }
 
     /// Append atomically and return the text after; string cells.
-    #[napi]
-    pub fn append(&self, text: String) -> Result<String> {
+    pub fn append(
+        &self,
+        text: String,
+    ) -> Result<String> {
         let Value::Text(cell) = &self.value else {
             return Err(Error::new(
                 Status::InvalidArg,
@@ -183,7 +203,6 @@ impl Cell {
     }
 
     /// The write count. Take it before `get()`, and `wait()` misses nothing.
-    #[napi]
     pub fn version(&self) -> Result<u32> {
         match &self.value {
             Value::Int(cell) => cell.version(),
@@ -196,8 +215,10 @@ impl Cell {
 
     /// Resolve once the cell has been written since `since`, by any process;
     /// the write count then. Woken by the write, never by an interval.
-    #[napi]
-    pub async fn wait(&self, since: u32) -> Result<u32> {
+    pub async fn wait(
+        &self,
+        since: u32,
+    ) -> Result<u32> {
         let value = self.value.clone();
         tokio::task::spawn_blocking(move || match value {
             Value::Int(cell) => cell.wait_changed(since),
@@ -211,7 +232,6 @@ impl Cell {
     }
 
     /// Give the cell back; every handle to it goes stale.
-    #[napi]
     pub fn release(&self) -> Result<()> {
         match self.value.clone() {
             Value::Int(cell) => cell.release(),
