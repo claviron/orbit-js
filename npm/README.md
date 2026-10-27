@@ -93,3 +93,11 @@ bindings or add your own Rust functions. The npm package includes the prebuilt
 bindings listed above.
 
 MIT licensed.
+
+### Lifecycle signals
+
+After `stop`, `link.signal` remains aborted throughout the stopped state.
+`start` after a stop and `restart` publish a new live signal before invoking
+lifecycle listeners. Previously captured signals stay aborted, including those
+attached to accepted requests. Repeated `stop` preserves the stopped signal;
+`start` on an already running generation preserves its live signal.

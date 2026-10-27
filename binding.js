@@ -112,8 +112,9 @@ export class Link {
 
   /**
    * Call `listener` with `"start"`, `"stop"` or `"restart"` after the edge
-   * changed the application. On stop and restart, `signal` has already
-   * aborted; a restart is the moment to rebuild what the application holds.
+   * changed the application. Stop leaves `signal` aborted until start.
+   * Start after stop and restart publish a new live signal before notifying
+   * listeners; previously captured signals remain aborted.
    *
    * @param {(action: "start" | "stop" | "restart") => void} listener
    */
@@ -236,6 +237,9 @@ export class Link {
             this.#generation.abort(
               new DOMException(`application ${control.action}`, "AbortError"),
             );
+          }
+          if (control.action === "restart" ||
+              (control.action === "start" && this.#generation.signal.aborted)) {
             this.#generation = new AbortController();
           }
           notify(this.#lifecycle, control.action, `lifecycle '${control.action}'`);
