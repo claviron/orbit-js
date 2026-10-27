@@ -1,6 +1,6 @@
 {
   "name": "@claviron/orbit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Serve a Deno, Node or Bun application behind a Claviron edge over Orbit Link",
   "type": "module",
   "main": "index.js",
@@ -19,7 +19,8 @@
     "prebuilds/freebsd-arm64/orbit.node",
     "prebuilds/linux-x64-gnu/orbit.node",
     "prebuilds/linux-arm64-gnu/orbit.node",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "bash scripts/build-native.sh",

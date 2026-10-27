@@ -43,6 +43,7 @@ async function fixture(t) {
   const published = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
   await writeFile(join(root, "package.json"), JSON.stringify({ ...published, name: "example-addon", version: "1.0.0" }));
   await writeFile(join(root, "README.md"), "Repository build and customization guide\n");
+  await writeFile(join(root, "LICENSE"), "Fixture license\n");
   await writeFile(join(root, "npm/README.md"), "Consumer installation guide\n");
   return root;
 }
