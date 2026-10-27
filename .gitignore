@@ -11,3 +11,6 @@
 
 /prebuilds/
 /.release-sync.local.json
+/.hosts
+/.hosts.*
+!/.hosts.example

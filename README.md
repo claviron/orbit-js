@@ -136,6 +136,33 @@ package metadata and release inputs. Changing those inputs invalidates existing
 receipts; prepare them again. Local development binaries under `native/` are
 kept separate from release artifacts.
 
+### Build on several hosts
+
+Copy `.hosts.example` to the ignored `.hosts` file and set your SSH aliases,
+repository paths and release targets. Optional `jobs`, `nice` and `cache` fields
+control each builder. SSH, rsync, Git, Node.js, Bash and the target's Rust toolchain
+must already be available.
+Commit and push the builder scripts and build inputs before starting a new revision.
+
+```sh
+bash scripts/build-all.sh --dry-run
+bash scripts/build-all.sh
+# Or select entries from .hosts:
+bash scripts/build-all.sh --host linux --host freebsd
+```
+
+Selected hosts build concurrently from isolated clones of the current commit.
+The worker script comes from that commit in the remote repository; missing
+commits are fetched from its `origin` without switching the development checkout.
+Their development checkouts are preserved. The committed release inputs must
+match the local inputs; the remote worker checks this before compiling. Builds
+continue in the background if an SSH connection closes, with their job/log paths
+reported locally. A failed host does not stop the other selected builds.
+
+The command collects only verified `orbit.node` and `release.json` pairs into
+`prebuilds/`. Per-host logs and the combined result are under `target/build-all/`.
+It prepares artifacts; publication remains the separate step below.
+
 The scripts validate the target binary header, source digest and checksum for
 all declared targets. This does not replace loading and testing each binary on
 its intended operating system. If your fork supports a different target set,

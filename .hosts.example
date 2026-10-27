@@ -1,0 +1,16 @@
+{
+  "hosts": {
+    "linux": {
+      "ssh": "build-linux",
+      "repository": "/srv/source/orbit-js",
+      "target": "linux-x64-gnu",
+      "jobs": 2
+    },
+    "freebsd": {
+      "ssh": "build-freebsd",
+      "repository": "/srv/source/orbit-js",
+      "target": "freebsd-x64",
+      "jobs": 2
+    }
+  }
+}
