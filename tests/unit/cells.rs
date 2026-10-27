@@ -56,3 +56,51 @@ fn representable_integer_boundaries_keep_their_exact_value() {
     assert_eq!(cell.get().unwrap(), CellValue::Int(i64::MAX));
     assert_eq!(cell.version().unwrap(), version);
 }
+
+#[tokio::test]
+async fn text_wait_preserves_full_width_revision_tokens() {
+    let cells = cells();
+    let cell = cells.string(Some("before".into())).unwrap();
+    let since = cell.version().unwrap();
+    // These are distinct opaque tokens, including one whose low u32 equals
+    // the current token. Narrowing it would incorrectly park this wait.
+    for other in [since + (1_u64 << 32), (1_u64 << 53) + 1, u64::MAX] {
+        assert_eq!(cell.wait(other).await.unwrap(), since);
+    }
+    assert_eq!(cell.get().unwrap(), CellValue::Text("before".into()));
+    cell.append(" after".into()).unwrap();
+    let committed = cell.version().unwrap();
+    assert_ne!(committed, since);
+    let reopened = cells.open(cell.id()).unwrap();
+    assert_eq!(reopened.wait(since).await.unwrap(), committed);
+    assert_eq!(reopened.get().unwrap(), CellValue::Text("before after".into()));
+    cell.release().unwrap();
+}
+
+#[tokio::test]
+async fn scalar_wait_rejects_revisions_outside_u32_without_truncating() {
+    let cells = cells();
+    for cell in [
+        cells.int(None).unwrap(),
+        cells.float(None).unwrap(),
+        cells.bool(None).unwrap(),
+    ] {
+        let since = cell.version().unwrap();
+        for invalid in [u64::from(u32::MAX) + 1, u64::MAX] {
+            assert_eq!(
+                cell.wait(invalid).await.unwrap_err().kind,
+                Status::InvalidArg
+            );
+            assert_eq!(cell.version().unwrap(), since);
+        }
+        let changed = match cell.kind().as_str() {
+            "int" => CellValue::Int(1),
+            "float" => CellValue::Float(1.0),
+            "bool" => CellValue::Bool(true),
+            _ => unreachable!(),
+        };
+        cell.set(changed).unwrap();
+        assert_eq!(cell.wait(since).await.unwrap(), cell.version().unwrap());
+        cell.release().unwrap();
+    }
+}

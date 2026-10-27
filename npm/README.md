@@ -115,9 +115,9 @@ application's responsibility.
 ### Numeric cells
 
 JavaScript numeric cell inputs and outputs use `Number`; `BigInt` is not
-supported. Integer constructors, setters and deltas require finite whole
-numbers in `[-2^63, 2^63)`, checked before mutation. Float setters preserve
-fractional values and IEEE non-finite values. Rejected integer inputs change
+supported for numeric cell values. Integer constructors, setters and deltas
+require finite whole numbers in `[-2^63, 2^63)`, checked before mutation.
+Float setters preserve fractional values and IEEE non-finite values. Rejected integer inputs change
 neither the value nor its write count.
 
 Only `Number.MIN_SAFE_INTEGER` through `Number.MAX_SAFE_INTEGER` guarantee
@@ -125,3 +125,22 @@ consecutive integer precision. Outside that range, inputs already reflect
 JavaScript's rounding, and reading a Rust-created i64 can round the result.
 Keep integer values and arithmetic within the safe range when exact JavaScript
 round trips are required. Rust's `CellValue::Int` retains the full i64 domain.
+
+### Cell revisions
+
+For integer, float and boolean cells, `version()` returns a `Number` write count
+and `wait(since)` accepts a whole `Number` in `[0, 2^32 - 1]` and resolves to a
+`Number`. Text cells use `BigInt` for both the result and the argument: their
+revision tokens are opaque unsigned 64-bit values. Pass them back unchanged;
+do not convert them to `Number` or assume consecutive revisions.
+
+```js
+const since = cell.version();
+const value = cell.get();
+// Process value, then wait for a later write without missing an intervening one.
+const next = await cell.wait(since);
+```
+
+The same sequence works with scalar and text cells without converting the token.
+Text revision support requires a rebuilt addon compatible with the updated
+text-cell protocol; older binaries use a different shared-memory table.

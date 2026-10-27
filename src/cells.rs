@@ -201,33 +201,47 @@ impl Cell {
         cell.load().map_err(failure)
     }
 
-    /// The write count. Take it before `get()`, and `wait()` misses nothing.
-    pub fn version(&self) -> Result<u32> {
+    /// The revision token. Scalar write counts are widened from u32; text
+    /// revisions retain all 64 bits. Take it before `get()` and pass it back
+    /// unchanged to `wait()`; text revisions are not consecutive write counts.
+    pub fn version(&self) -> Result<u64> {
         match &self.value {
-            Value::Int(cell) => cell.version(),
-            Value::Float(cell) => cell.version(),
-            Value::Bool(cell) => cell.version(),
+            Value::Int(cell) => cell.version().map(u64::from),
+            Value::Float(cell) => cell.version().map(u64::from),
+            Value::Bool(cell) => cell.version().map(u64::from),
             Value::Text(cell) => cell.version(),
         }
         .map_err(failure)
     }
 
     /// Resolve once the cell has been written since `since`, by any process;
-    /// the write count then. Woken by the write, never by an interval.
+    /// the revision token then. Woken by the write, never by an interval.
     pub async fn wait(
         &self,
-        since: u32,
-    ) -> Result<u32> {
+        since: u64,
+    ) -> Result<u64> {
         let value = self.value.clone();
-        tokio::task::spawn_blocking(move || match value {
-            Value::Int(cell) => cell.wait_changed(since),
-            Value::Float(cell) => cell.wait_changed(since),
-            Value::Bool(cell) => cell.wait_changed(since),
-            Value::Text(cell) => cell.wait_changed(since),
+        tokio::task::spawn_blocking(move || {
+            Ok(match value {
+                Value::Int(cell) => u64::from(
+                    cell.wait_changed(scalar_revision(since)?)
+                        .map_err(failure)?,
+                ),
+                Value::Float(cell) => u64::from(
+                    cell.wait_changed(scalar_revision(since)?)
+                        .map_err(failure)?,
+                ),
+                Value::Bool(cell) => u64::from(
+                    cell.wait_changed(scalar_revision(since)?)
+                        .map_err(failure)?,
+                ),
+                Value::Text(cell) => {
+                    cell.wait_changed(since).map_err(failure)?
+                }
+            })
         })
         .await
         .map_err(failure)?
-        .map_err(failure)
     }
 
     /// Give the cell back; every handle to it goes stale.
@@ -240,6 +254,15 @@ impl Cell {
         }
         .map_err(failure)
     }
+}
+
+fn scalar_revision(since: u64) -> Result<u32> {
+    u32::try_from(since).map_err(|_| {
+        Error::new(
+            Status::InvalidArg,
+            "expected a scalar revision in the u32 range",
+        )
+    })
 }
 
 fn failure(error: impl std::fmt::Display) -> Error {

@@ -42,4 +42,43 @@ try {
     }
     console.log("Native cell numeric constructors and setters passed.");
   } finally { integer.release(); float.release(); }
+
+  for (const [cell, value] of [
+    [cells.int(0), 1], [cells.float(0), 0.5], [cells.bool(false), true],
+  ]) {
+    try {
+      const since = cell.version();
+      assert.equal(typeof since, "number");
+      for (const invalid of [-1, 0.5, NaN, Infinity, 2 ** 32, 1n]) {
+        await assert.rejects(cell.wait(invalid), /scalar revision/);
+        assert.equal(cell.version(), since);
+      }
+      const pending = cell.wait(since);
+      cell.set(value);
+      assert.equal(await pending, cell.version());
+      assert.equal(typeof await cell.wait(since), "number");
+    } finally { cell.release(); }
+  }
+
+  const text = cells.string("before");
+  try {
+    const since = text.version();
+    assert.equal(typeof since, "bigint");
+    for (const other of [since + (1n << 32n), (1n << 53n) + 1n, (1n << 64n) - 1n]) {
+      assert.equal(await text.wait(other), since);
+    }
+    for (const invalid of [Number(since), -1n, 1n << 64n, (1n << 64n) + since]) {
+      await assert.rejects(text.wait(invalid), /text revision/);
+      assert.equal(text.version(), since);
+    }
+    const reopened = cells.open(text.id);
+    const pending = reopened.wait(since);
+    text.append(" after");
+    const committed = await pending;
+    assert.equal(typeof committed, "bigint");
+    assert.notEqual(committed, since);
+    assert.equal(committed, text.version());
+    assert.equal(reopened.get(), "before after");
+  } finally { text.release(); }
+  console.log("Native scalar Number and text BigInt revision round trips passed.");
 } finally { await link.close(); }

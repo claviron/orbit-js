@@ -213,7 +213,8 @@ export class Link {
    * The fleet's Orbit cells, shared with every instance of this application:
    * `cells.int(0)`, `float`, `bool`, `string`, or `cells.open(id)`. A cell
    * offers `get`, `set`, atomic `add` / `append`, `version` and
-   * `await wait(since)`, woken by the write itself.
+   * `await wait(since)`, woken by the write itself. Scalar revision tokens are
+   * Numbers; text revision tokens are BigInts. Pass tokens back unchanged.
    */
   get cells() {
     return this.#native.cells;

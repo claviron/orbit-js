@@ -8,7 +8,9 @@
 macro_rules! export_bindings {
     () => {
         mod orbit_bindings {
-            use napi::bindgen_prelude::{Buffer, Either3, Either4};
+            use napi::bindgen_prelude::{
+                BigInt, Buffer, Either, Either3, Either4,
+            };
             use napi::{Error, Result, Status};
             use napi_derive::napi;
             use orbit::__private::{napi, napi_derive, serde_json};
@@ -372,6 +374,55 @@ macro_rules! export_bindings {
 
             type Loaded = Either4<i64, f64, bool, String>;
             type Input = Either3<f64, bool, String>;
+            type Revision = Either<u32, BigInt>;
+            type RevisionInput = Either<f64, BigInt>;
+
+            fn revision(
+                value: u64,
+                text: bool,
+            ) -> Result<Revision> {
+                if text {
+                    Ok(Either::B(BigInt::from(value)))
+                } else {
+                    u32::try_from(value).map(Either::A).map_err(|_| {
+                        Error::new(
+                            Status::InvalidArg,
+                            "scalar revision exceeds u32",
+                        )
+                    })
+                }
+            }
+
+            fn revision_input(
+                value: RevisionInput,
+                text: bool,
+            ) -> Result<u64> {
+                match (text, value) {
+                    (true, Either::B(value)) => {
+                        let (negative, value, lossless) = value.get_u64();
+                        if !negative && lossless {
+                            return Ok(value);
+                        }
+                    }
+                    (false, Either::A(value))
+                        if value.is_finite()
+                            && value.fract() == 0.0
+                            && value >= 0.0
+                            && value <= f64::from(u32::MAX) =>
+                    {
+                        return Ok(value as u64);
+                    }
+                    _ => {}
+                }
+                Err(Error::new(
+                    Status::InvalidArg,
+                    if text {
+                        "expected a text revision BigInt in the u64 range"
+                    } else {
+                        "expected a scalar revision Number in the u32 range"
+                    },
+                ))
+            }
 
             fn loaded(value: orbit::CellValue) -> Loaded {
                 match value {
@@ -428,15 +479,23 @@ macro_rules! export_bindings {
                     self.inner.append(text).map_err(failure)
                 }
                 #[napi]
-                pub fn version(&self) -> Result<u32> {
-                    self.inner.version().map_err(failure)
+                pub fn version(&self) -> Result<Revision> {
+                    revision(
+                        self.inner.version().map_err(failure)?,
+                        self.inner.kind() == "string",
+                    )
                 }
                 #[napi]
                 pub async fn wait(
                     &self,
-                    since: u32,
-                ) -> Result<u32> {
-                    self.inner.wait(since).await.map_err(failure)
+                    since: RevisionInput,
+                ) -> Result<Revision> {
+                    let text = self.inner.kind() == "string";
+                    let since = revision_input(since, text)?;
+                    revision(
+                        self.inner.wait(since).await.map_err(failure)?,
+                        text,
+                    )
                 }
                 #[napi]
                 pub fn release(&self) -> Result<()> {
