@@ -1,8 +1,162 @@
 //! Terminal ownership of an HTTP exchange's stream halves.
 
+use std::sync::Arc;
+
 use claviron::orbitive::stream::{ReadHalf, WriteHalf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Terminal {
+    Open,
+    Finished,
+    Cancelled,
+}
+
+enum Command {
+    Write(Vec<u8>, oneshot::Sender<crate::Result<()>>),
+    Finish(oneshot::Sender<crate::Result<()>>),
+}
+
+/// One driver owns output readiness, including idle reader-departure wakes.
+/// Only one command may be buffered; writers await their own acknowledgement.
+pub(crate) struct Output {
+    commands: mpsc::Sender<Command>,
+    terminal: watch::Receiver<Terminal>,
+    stopped: watch::Sender<bool>,
+}
+
+impl Output {
+    pub(crate) fn new(
+        outgoing: Option<WriteHalf>,
+        incoming: Arc<Mutex<Option<ReadHalf>>>,
+        stopped: watch::Sender<bool>,
+    ) -> Self {
+        let (commands, receiver) = mpsc::channel(1);
+        let (terminal, state) = watch::channel(Terminal::Open);
+        tokio::spawn(drive(
+            outgoing,
+            incoming,
+            stopped.clone(),
+            receiver,
+            terminal,
+        ));
+        Self { commands, terminal: state, stopped }
+    }
+
+    pub(crate) async fn write(
+        &self,
+        bytes: &[u8],
+    ) -> crate::Result<()> {
+        let (done, result) = oneshot::channel();
+        self.commands
+            .send(Command::Write(bytes.to_vec(), done))
+            .await
+            .map_err(|_| crate::abandoned())?;
+        result.await.map_err(|_| crate::abandoned())?
+    }
+
+    pub(crate) async fn finish(&self) -> crate::Result<()> {
+        let (done, result) = oneshot::channel();
+        if self.commands.send(Command::Finish(done)).await.is_err() {
+            return if self.closed().await {
+                Err(crate::abandoned())
+            } else {
+                Ok(())
+            };
+        }
+        result.await.map_err(|_| crate::abandoned())?
+    }
+
+    pub(crate) async fn closed(&self) -> bool {
+        let mut state = self.terminal.clone();
+        loop {
+            match *state.borrow_and_update() {
+                Terminal::Finished => return false,
+                Terminal::Cancelled => return true,
+                Terminal::Open => {}
+            }
+            if state.changed().await.is_err() {
+                return true;
+            }
+        }
+    }
+
+    pub(crate) async fn abort(&self) {
+        self.stopped.send_replace(true);
+        self.closed().await;
+    }
+}
+
+async fn drive(
+    mut outgoing: Option<WriteHalf>,
+    incoming: Arc<Mutex<Option<ReadHalf>>>,
+    stopped: watch::Sender<bool>,
+    mut commands: mpsc::Receiver<Command>,
+    terminal: watch::Sender<Terminal>,
+) {
+    let mut cancelled = stopped.subscribe();
+    let mut finished = None;
+    let state = loop {
+        if *cancelled.borrow_and_update() {
+            break Terminal::Cancelled;
+        }
+        let command = tokio::select! {
+            biased;
+            _ = cancelled.changed() => break Terminal::Cancelled,
+            _ = async {
+                match &mut outgoing {
+                    Some(output) => { let _ = output.peer_closed().await; },
+                    None => std::future::pending().await,
+                }
+            } => break Terminal::Cancelled,
+            command = commands.recv() => command,
+        };
+        match command {
+            Some(Command::Write(bytes, done)) => {
+                let result = match &mut outgoing {
+                    Some(output) => tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => Err(crate::abandoned()),
+                        result = output.write_all(&bytes) => result.map_err(crate::failure),
+                    },
+                    None => Err(crate::abandoned()),
+                };
+                let failed = result.is_err();
+                let _ = done.send(result);
+                if failed {
+                    break Terminal::Cancelled;
+                }
+            }
+            Some(Command::Finish(done)) => {
+                let result = match &mut outgoing {
+                    Some(output) => {
+                        output.shutdown().await.map_err(crate::failure)
+                    }
+                    None => Ok(()),
+                };
+                let state = if result.is_ok() {
+                    Terminal::Finished
+                } else {
+                    Terminal::Cancelled
+                };
+                finished = Some((done, result));
+                break state;
+            }
+            None => break Terminal::Cancelled,
+        }
+    };
+    // Wake an input read before acquiring its mutex. Drop both halves before
+    // acknowledging completion, even if the JavaScript wrapper stays alive.
+    commands.close();
+    stopped.send_replace(true);
+    drop(outgoing);
+    incoming.lock().await.take();
+    terminal.send_replace(state);
+    if let Some((done, result)) = finished {
+        let _ = done.send(result);
+    }
+}
 
 pub(crate) async fn read(
     incoming: &Mutex<Option<ReadHalf>>,
@@ -25,24 +179,6 @@ pub(crate) async fn read(
     }
     piece.truncate(read);
     Ok(Some(piece))
-}
-
-pub(crate) async fn finish(
-    incoming: &Mutex<Option<ReadHalf>>,
-    outgoing: &Mutex<Option<WriteHalf>>,
-    stopped: &watch::Sender<bool>,
-) -> std::io::Result<()> {
-    // Publish FIN before retiring unread input. Even a failed shutdown is a
-    // terminal HTTP path: a wrapper awaiting GC must retain no stream half.
-    let result = match outgoing.lock().await.take() {
-        Some(mut outgoing) => outgoing.shutdown().await,
-        None => Ok(()),
-    };
-    // A concurrent read may hold the input mutex. Wake it before taking that
-    // mutex; neither peer progress nor garbage collection is a close signal.
-    stopped.send_replace(true);
-    incoming.lock().await.take();
-    result
 }
 
 #[cfg(test)]

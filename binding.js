@@ -83,7 +83,9 @@ export class Link {
           console.error("orbit-js: session cleanup failed", error);
         });
       } else {
-        answer(exchange, handler, this.#generation.signal);
+        answer(exchange, handler, this.#generation.signal).catch((error) => {
+          console.error("orbit-js: HTTP cleanup failed", error);
+        });
       }
     }
   }
@@ -307,29 +309,33 @@ function notify(listeners, value, what) {
   }
 }
 
-// Answer one exchange. `generation` aborts when the edge stops or restarts the
-// application: the request's signal follows it, a handler still running is
-// no longer waited for, and a body still streaming is cut — the edge, and the
-// client behind it, are never left holding an open reply.
+// The native output owner watches reader departure even while no response data
+// is produced. Generation retirement and peer departure share request cleanup.
 async function answer(exchange, handler, generation) {
   const controller = new AbortController();
   const signal = controller.signal;
-  const follow = () => controller.abort(generation.reason);
-  if (generation.aborted) {
-    follow();
-  } else {
-    generation.addEventListener("abort", follow, { once: true });
-  }
   const stopped = new Promise((resolve) => {
     signal.addEventListener("abort", resolve, { once: true });
   });
-  const handled = Promise.resolve().then(() => handler(request(exchange, signal)));
-  // A handler outrun by the abort settles later; its result goes nowhere.
-  handled.then(
-    (late) => signal.aborted && late?.body?.cancel(signal.reason).catch(() => {}),
-    () => {},
-  );
+  const follow = () => controller.abort(generation.reason);
+  if (generation.aborted) follow();
+  else generation.addEventListener("abort", follow, { once: true });
+  const departed = () => controller.abort(
+    new DOMException("the edge ended the reply", "AbortError"));
+  const watching = exchange.waitClosed().then((cancelled) => {
+    if (cancelled) departed();
+  }, departed);
+  let claimed = false;
+  let aborting;
+  const abort = () => aborting ??= exchange.abort();
   try {
+    if (signal.aborted) return;
+    const handled = Promise.resolve().then(() => handler(request(exchange, signal)));
+    // A handler that ignores its signal may settle later. Dispose of its body
+    // without retaining the bridge wait or cancelling an already claimed reader.
+    handled.then((late) => {
+      if (signal.aborted && !claimed) late?.body?.cancel(signal.reason).catch(() => {});
+    }, () => {});
     let response;
     try {
       response = await Promise.race([handled, stopped]);
@@ -339,52 +345,45 @@ async function answer(exchange, handler, generation) {
         response = new Response("Internal Server Error", { status: 500 });
       }
     }
-    if (signal.aborted) {
-      await exchange.abort();
-      return;
-    }
-    await reply(exchange, response, controller);
+    if (signal.aborted) return;
+    claimed = true;
+    await reply(exchange, response, controller, stopped, abort);
+  } catch (error) {
+    controller.abort(error);
+    console.error("orbit-js: response failed", error);
   } finally {
     generation.removeEventListener("abort", follow);
+    if (signal.aborted) await abort();
+    // Normal end and abort both settle the observer; it must not outlive work.
+    await watching;
   }
 }
 
-// The edge ends its side of a reply on its own terms — the client left, or an
-// event stream at the edge's shutdown. A write that fails says so, and the
-// request's signal aborts: the handler hears it as a client that left.
-async function reply(exchange, response, controller) {
+async function reply(exchange, response, controller, stopped, abort) {
   const signal = controller.signal;
   const reader = response.body?.getReader();
-  // A write may be parked on a slow client; aborting the exchange frees it.
   const cancel = () => {
     reader?.cancel(signal.reason).catch(() => {});
-    exchange.abort();
+    abort().catch(() => {});
   };
   signal.addEventListener("abort", cancel, { once: true });
   try {
+    if (signal.aborted) { cancel(); return; }
     exchange.respond(response.status, [...response.headers]);
     if (reader) {
       for (;;) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-        await exchange.write(value);
+        const piece = await Promise.race([reader.read(), stopped]);
+        if (signal.aborted) return;
+        if (piece.done) break;
+        await exchange.write(piece.value);
       }
     }
-    if (signal.aborted) {
-      await exchange.abort();
-    } else {
-      await exchange.end();
-    }
+    if (!signal.aborted) await exchange.end();
   } catch (error) {
-    if (!signal.aborted) {
-      controller.abort(new DOMException("the edge ended the reply", "AbortError"));
-    }
-    reader?.cancel(error).catch(() => {});
-    await exchange.abort();
+    if (!signal.aborted) controller.abort(error);
   } finally {
     signal.removeEventListener("abort", cancel);
+    reader?.releaseLock();
   }
 }
 

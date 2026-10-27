@@ -369,7 +369,8 @@ pub struct Exchange {
     session_kind: Option<&'static str>,
     http_version: &'static str,
     session: std::sync::OnceLock<session::Session>,
-    incoming: tokio::sync::Mutex<Option<ReadHalf>>,
+    incoming: Arc<tokio::sync::Mutex<Option<ReadHalf>>>,
+    http: Option<http::Output>,
     outgoing: tokio::sync::Mutex<Option<WriteHalf>>,
     replied: Mutex<bool>,
     /// Set by `abort`, so a read or write waiting on the edge gives up its
@@ -411,6 +412,21 @@ impl Exchange {
                 "websocket"
             },
         );
+        let has_body = incoming.is_some();
+        let incoming = Arc::new(tokio::sync::Mutex::new(incoming));
+        let aborted = tokio::sync::watch::Sender::new(false);
+        let (http, outgoing) = if session_kind.is_none() {
+            (
+                Some(http::Output::new(
+                    outgoing,
+                    Arc::clone(&incoming),
+                    aborted.clone(),
+                )),
+                None,
+            )
+        } else {
+            (None, outgoing)
+        };
         Ok(Self {
             segment,
             correlation: exchange.correlation,
@@ -419,14 +435,15 @@ impl Exchange {
             method: exchange.method,
             url,
             headers,
-            has_body: incoming.is_some(),
+            has_body,
             session_kind,
             http_version: exchange.version.as_str(),
             session: std::sync::OnceLock::new(),
-            incoming: tokio::sync::Mutex::new(incoming),
+            incoming,
+            http,
             outgoing: tokio::sync::Mutex::new(outgoing),
             replied: Mutex::new(false),
-            aborted: tokio::sync::watch::Sender::new(false),
+            aborted,
         })
     }
 }
@@ -438,12 +455,16 @@ impl Exchange {
         &self,
         status: u16,
     ) -> bool {
-        self.incoming.lock().await.take();
         if self.respond(status, Vec::new()).is_err() {
             return false;
         }
-        if let Some(mut outgoing) = self.outgoing.lock().await.take() {
-            let _ = outgoing.shutdown().await;
+        if let Some(http) = &self.http {
+            let _ = http.finish().await;
+        } else {
+            self.incoming.lock().await.take();
+            if let Some(mut outgoing) = self.outgoing.lock().await.take() {
+                let _ = outgoing.shutdown().await;
+            }
         }
         true
     }
@@ -541,35 +562,33 @@ impl Exchange {
         chunk: &[u8],
     ) -> Result<()> {
         self.require_http()?;
-        let mut held = self.outgoing.lock().await;
-        let Some(outgoing) = held.as_mut() else {
-            return Err(Error::new(
-                Status::GenericFailure,
-                "this exchange has no body slot to write to",
-            ));
-        };
-        let mut aborted = self.aborted.subscribe();
-        if *aborted.borrow_and_update() {
-            return Err(abandoned());
-        }
-        tokio::select! {
-            written = outgoing.write_all(chunk) => written.map_err(failure),
-            _ = aborted.changed() => Err(abandoned()),
-        }
+        self.http.as_ref().expect("HTTP output").write(chunk).await
+    }
+
+    /// Wait for terminal HTTP ownership: true on cancellation, false on FIN.
+    /// This observer does not compete with writes for the stream registration.
+    pub async fn wait_closed(&self) -> Result<bool> {
+        self.require_http()?;
+        Ok(self.http.as_ref().expect("HTTP output").closed().await)
     }
 
     /// Close the reply body; the edge sees its end.
     pub async fn end(&self) -> Result<()> {
         self.require_http()?;
-        http::finish(&self.incoming, &self.outgoing, &self.aborted)
-            .await
-            .map_err(failure)
+        self.http.as_ref().expect("HTTP output").finish().await
     }
 
-    /// Abandon the exchange. Before a reply head the edge gets a 503 with an
-    /// empty body; after it, the body is cut, so the edge sees it unfinished.
-    /// Either way nothing on the edge is left waiting for this process.
+    /// Abandon the exchange and release its halves without waiting for GC.
     pub async fn abort(&self) {
+        if let Some(http) = &self.http {
+            // Publish a refusal before cancellation when no head was sent.
+            if self.respond(503, Vec::new()).is_ok() {
+                let _ = http.finish().await;
+            } else {
+                http.abort().await;
+            }
+            return;
+        }
         self.aborted.send_replace(true);
         if let Some(session) = self.session.get() {
             session.abort().await;

@@ -205,6 +205,10 @@ macro_rules! export_bindings {
                     self.inner.write(&chunk).await.map_err(failure)
                 }
                 #[napi]
+                pub async fn wait_closed(&self) -> Result<bool> {
+                    self.inner.wait_closed().await.map_err(failure)
+                }
+                #[napi]
                 pub async fn end(&self) -> Result<()> {
                     self.inner.end().await.map_err(failure)
                 }

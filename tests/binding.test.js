@@ -35,6 +35,7 @@ test("invalid custom binding fails before joining", () => {
 
 test("custom binding carries streamed requests and replies through the shared adapter", async () => {
   const finished = Promise.withResolvers();
+  const terminal = Promise.withResolvers();
   const chunks = [Buffer.from("from Rust")];
   const written = [];
   let head;
@@ -43,7 +44,8 @@ test("custom binding carries streamed requests and replies through the shared ad
     async read() { return chunks.shift() ?? null; },
     respond(status, headers) { head = { status, headers }; },
     async write(chunk) { written.push(Buffer.from(chunk)); },
-    async end() { finished.resolve(); },
+    async waitClosed() { return terminal.promise; },
+    async end() { terminal.resolve(false); finished.resolve(); },
     async abort() { finished.reject(new Error("Unexpected abort")); },
   };
   let incoming = exchange;

@@ -170,3 +170,19 @@ package. Keep credentials and environment-specific release configuration in
 ignored local files; do not place them in either public README.
 
 MIT licensed.
+
+## HTTP response cancellation
+
+Each HTTP exchange observes response-reader departure even while the Fetch
+handler or its response body is idle. Peer cancellation aborts `request.signal`,
+cancels the response reader, and releases native stream ownership without waiting
+for garbage collection. A handler that returns after cancellation has its late
+response body cancelled. Application work must cooperate with its AbortSignal.
+Normal request-upload EOF and successful response completion are not cancellation.
+The native `waitClosed()` method reports cancellation separately from successful
+completion; its observer uses the output owner's readiness registration.
+
+This requires a rebuilt native addon matching the JavaScript adapter. Message
+sessions retain their separate close and lifecycle handling. Cancellation is
+observable when the edge releases the response reader; network disconnect
+propagation also depends on the HTTP transport and its connection policy.
