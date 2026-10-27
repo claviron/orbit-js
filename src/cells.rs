@@ -145,10 +145,8 @@ impl Cell {
     ) -> Result<()> {
         match (&self.value, value) {
             (Value::Int(cell), CellValue::Int(value)) => cell.store(value),
-            (Value::Int(cell), CellValue::Float(value))
-                if value.fract() == 0.0 =>
-            {
-                cell.store(value as i64)
+            (Value::Int(cell), CellValue::Float(value)) => {
+                cell.store(integer_number(value)?)
             }
             (Value::Float(cell), CellValue::Int(value)) => {
                 cell.store(value as f64)
@@ -174,9 +172,10 @@ impl Cell {
         by: f64,
     ) -> Result<CellValue> {
         match &self.value {
-            Value::Int(cell) if by.fract() == 0.0 => {
-                cell.fetch_add(by as i64).map(CellValue::Int).map_err(failure)
-            }
+            Value::Int(cell) => cell
+                .fetch_add(integer_number(by)?)
+                .map(CellValue::Int)
+                .map_err(failure),
             Value::Float(cell) => {
                 cell.fetch_add(by).map(CellValue::Float).map_err(failure)
             }
@@ -246,3 +245,23 @@ impl Cell {
 fn failure(error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
 }
+
+// The upper bound is exclusive: i64::MAX rounds up to 2^63 as an f64.
+fn integer_number(value: f64) -> Result<i64> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value < -(i64::MIN as f64)
+    {
+        Ok(value as i64)
+    } else {
+        Err(Error::new(
+            Status::InvalidArg,
+            "expected a whole number in the i64 range",
+        ))
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/cells.rs"]
+mod tests;
