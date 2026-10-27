@@ -5,6 +5,7 @@
 *.md
 !README.md
 !npm/README.md
+/PLAN.md
 
 /native/*/release.json
 
