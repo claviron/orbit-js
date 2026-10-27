@@ -111,3 +111,17 @@ response and cleanup tasks. Close does not abort accepted HTTP work or invent
 a drain deadline. Peer cancellation and stop/restart still cancel only their
 own requests. Arbitrary handler work that ignores cancellation remains the
 application's responsibility.
+
+### Numeric cells
+
+JavaScript numeric cell inputs and outputs use `Number`; `BigInt` is not
+supported. Integer constructors, setters and deltas require finite whole
+numbers in `[-2^63, 2^63)`, checked before mutation. Float setters preserve
+fractional values and IEEE non-finite values. Rejected integer inputs change
+neither the value nor its write count.
+
+Only `Number.MIN_SAFE_INTEGER` through `Number.MAX_SAFE_INTEGER` guarantee
+consecutive integer precision. Outside that range, inputs already reflect
+JavaScript's rounding, and reading a Rust-created i64 can round the result.
+Keep integer values and arithmetic within the safe range when exact JavaScript
+round trips are required. Rust's `CellValue::Int` retains the full i64 domain.

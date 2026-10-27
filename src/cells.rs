@@ -247,7 +247,8 @@ fn failure(error: impl std::fmt::Display) -> Error {
 }
 
 // The upper bound is exclusive: i64::MAX rounds up to 2^63 as an f64.
-fn integer_number(value: f64) -> Result<i64> {
+#[doc(hidden)]
+pub fn integer_number(value: f64) -> Result<i64> {
     if value.is_finite()
         && value.fract() == 0.0
         && value >= i64::MIN as f64

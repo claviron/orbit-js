@@ -8,7 +8,7 @@
 macro_rules! export_bindings {
     () => {
         mod orbit_bindings {
-            use napi::bindgen_prelude::{Buffer, Either4};
+            use napi::bindgen_prelude::{Buffer, Either3, Either4};
             use napi::{Error, Result, Status};
             use napi_derive::napi;
             use orbit::__private::{napi, napi_derive, serde_json};
@@ -317,8 +317,12 @@ macro_rules! export_bindings {
                 #[napi]
                 pub fn int(
                     &self,
-                    value: Option<i64>,
+                    value: Option<f64>,
                 ) -> Result<Cell> {
+                    let value = value
+                        .map(orbit::__private::integer_number)
+                        .transpose()
+                        .map_err(failure)?;
                     self.inner
                         .int(value)
                         .map(|inner| Cell { inner })
@@ -367,6 +371,7 @@ macro_rules! export_bindings {
             }
 
             type Loaded = Either4<i64, f64, bool, String>;
+            type Input = Either3<f64, bool, String>;
 
             fn loaded(value: orbit::CellValue) -> Loaded {
                 match value {
@@ -399,13 +404,12 @@ macro_rules! export_bindings {
                 #[napi]
                 pub fn set(
                     &self,
-                    value: Loaded,
+                    value: Input,
                 ) -> Result<()> {
                     let value = match value {
-                        Either4::A(v) => orbit::CellValue::Int(v),
-                        Either4::B(v) => orbit::CellValue::Float(v),
-                        Either4::C(v) => orbit::CellValue::Bool(v),
-                        Either4::D(v) => orbit::CellValue::Text(v),
+                        Either3::A(v) => orbit::CellValue::Float(v),
+                        Either3::B(v) => orbit::CellValue::Bool(v),
+                        Either3::C(v) => orbit::CellValue::Text(v),
                     };
                     self.inner.set(value).map_err(failure)
                 }

@@ -32,6 +32,7 @@ mod bindings;
 #[cfg(feature = "napi")]
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::cells::integer_number;
     pub use napi;
     pub use napi_derive;
     pub use serde_json;
