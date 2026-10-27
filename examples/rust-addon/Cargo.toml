@@ -11,8 +11,8 @@ doctest = false
 
 [dependencies]
 orbit-js = { path = "../..", features = ["napi"] }
-napi = { version = "3", default-features = false, features = ["napi8"] }
-napi-derive = "3"
+napi = { version = "3.15", default-features = false, features = ["napi8"] }
+napi-derive = "3.6.13"
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.6"

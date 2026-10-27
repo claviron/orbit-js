@@ -13,4 +13,4 @@ doctest = false
 orbit-js = { path = "..", features = ["napi"] }
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.6"

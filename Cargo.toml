@@ -21,13 +21,13 @@ napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 claviron = { path = "../claviron", default-features = false, features = ["orbit", "application"] }
-napi = { version = "3", optional = true, default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
+napi = { version = "3.15", optional = true, default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
 serde_json = "1"
-napi-derive = { version = "3", optional = true }
-tokio = { version = "1.54", features = ["io-util", "sync", "rt", "macros"] }
+napi-derive = { version = "3.6.13", optional = true }
+tokio = { version = "1.54.1", features = ["io-util", "sync", "rt", "macros"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "rt-multi-thread"] }
 
 [profile.release]
 lto = "thin"
