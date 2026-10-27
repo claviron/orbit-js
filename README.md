@@ -10,6 +10,17 @@ requests through standard `Request` and `Response` objects.
 
 For installation and application examples, read the [npm package README](npm/README.md).
 
+## Benchmarks
+
+[Edge and Orbit application benchmarks](https://github.com/claviron/claviron/blob/main/examples/BENCHMARKS.md)
+include Node.js, Deno and Bun handlers served through Claviron Edge and Orbit
+Link, alongside native Rust controls and Python/PHP application paths.
+
+The report records hardware, runtime versions, worker and lane counts,
+throughput, p99 latency and errors for plain-text and JSON requests. macOS
+ARM64 and Linux x86-64 campaigns are documented separately with their
+configurations.
+
 ## Add your own native capabilities
 
 You can keep Orbit's bindings and export additional Rust functions from the same
