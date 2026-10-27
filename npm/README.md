@@ -101,3 +101,13 @@ After `stop`, `link.signal` remains aborted throughout the stopped state.
 lifecycle listeners. Previously captured signals stay aborted, including those
 attached to accepted requests. Repeated `stop` preserves the stopped signal;
 `start` on an already running generation preserves its live signal.
+
+### HTTP completion
+
+`link.close()` withdraws the lane before returning and ends message sessions.
+Await the promise returned by `link.serve()` (or the high-level `serve()`) before
+releasing resources used by accepted HTTP responses: that promise joins their
+response and cleanup tasks. Close does not abort accepted HTTP work or invent
+a drain deadline. Peer cancellation and stop/restart still cancel only their
+own requests. Arbitrary handler work that ignores cancellation remains the
+application's responsibility.

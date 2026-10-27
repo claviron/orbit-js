@@ -37,7 +37,7 @@ for (const firstRecord of [false, true]) {
     const started = Promise.withResolvers();
     let signal;
     let cancellations = 0;
-    await f.serve((request) => {
+    const serving = f.serve((request) => {
       signal = request.signal;
       return new Response(new ReadableStream({
         start(controller) {
@@ -51,6 +51,7 @@ for (const firstRecord of [false, true]) {
     if (firstRecord) await f.first;
     f.terminal.resolve(true);
     await f.finished;
+    await serving;
     assert.ok(signal.aborted);
     assert.equal(cancellations, 1);
     assert.equal(f.calls.observers, 0);
@@ -64,12 +65,13 @@ test("peer departure ends a pending handler and cancels its late body", async ()
   const response = Promise.withResolvers();
   const cancelled = Promise.withResolvers();
   let signal;
-  await f.serve((request) => {
+  const serving = f.serve((request) => {
     signal = request.signal; started.resolve(); return response.promise;
   });
   await started.promise;
   f.terminal.resolve(true);
   await f.finished;
+  await serving;
   assert.ok(signal.aborted);
   response.resolve(new Response(new ReadableStream({ cancel: cancelled.resolve })));
   await cancelled.promise;

@@ -45,6 +45,7 @@ export class Link {
   #generation = new AbortController();
   #sessionClosing = new AbortController();
   #sessions = new Set();
+  #http = new Set();
   #closing;
 
   constructor(link) {
@@ -58,7 +59,8 @@ export class Link {
 
   /**
    * Answer requests with `handler` until the link closes. Exchanges run side
-   * by side: a slow one does not hold the lane.
+   * by side: a slow one does not hold the lane. Completion joins accepted
+   * HTTP responses and their cleanup after intake stops.
    *
    * @param {(request: Request) => Response | Promise<Response>} handler
    * @param {{ onSession?: (session: import("./session.js").Session) => Promise<void> }} options
@@ -68,25 +70,35 @@ export class Link {
       throw new TypeError("onSession must be a function.");
     }
     this.#control();
-    for (;;) {
-      const exchange = await this.#native.next();
-      if (exchange === null) {
-        await this.#endSessions();
-        return;
+    try {
+      for (;;) {
+        const exchange = await this.#native.next();
+        if (exchange === null) {
+          return;
+        }
+        if (exchange.isSession) {
+          const task = answerSession(exchange, onSession,
+            [this.#generation.signal, this.#sessionClosing.signal]);
+          this.#sessions.add(task);
+          task.then(() => this.#sessions.delete(task), (error) => {
+            this.#sessions.delete(task);
+            console.error("orbit-js: session cleanup failed", error);
+          });
+        } else {
+          const task = answer(exchange, handler, this.#generation.signal);
+          this.#http.add(task);
+          task.then(() => this.#http.delete(task), (error) => {
+            this.#http.delete(task);
+            console.error("orbit-js: HTTP cleanup failed", error);
+          });
+        }
       }
-      if (exchange.isSession) {
-        const task = answerSession(exchange, onSession,
-          [this.#generation.signal, this.#sessionClosing.signal]);
-        this.#sessions.add(task);
-        task.then(() => this.#sessions.delete(task), (error) => {
-          this.#sessions.delete(task);
-          console.error("orbit-js: session cleanup failed", error);
-        });
-      } else {
-        answer(exchange, handler, this.#generation.signal).catch((error) => {
-          console.error("orbit-js: HTTP cleanup failed", error);
-        });
-      }
+    } catch (error) {
+      await this.close();
+      throw error;
+    } finally {
+      await this.#endSessions();
+      while (this.#http.size) await Promise.allSettled([...this.#http]);
     }
   }
 
@@ -207,7 +219,10 @@ export class Link {
     return this.#native.cells;
   }
 
-  /** Stop being a target and stop taking events; the lane is released. */
+  /**
+   * Withdraw the lane and end message sessions. Await the promise returned by
+   * serve() to join accepted HTTP responses; close() does not abort them.
+   */
   close() {
     this.#closing ??= (async () => {
       await this.#native.close();
@@ -281,7 +296,8 @@ export class Link {
 
 /**
  * Serve `handler` until `options.signal` aborts, then release the lane so the
- * edge stops choosing it. HTTP requests already taken still finish; accepted
+ * edge stops choosing it. Completion waits for accepted HTTP response cleanup;
+ * HTTP requests already taken still finish; accepted
  * message sessions reset so reads and backpressured writes can stop.
  *
  * @param {{ fleet: string, name: string, frameworks?: string[], framework?: string, icon?: string, signal?: AbortSignal, onSession?: (session: import("./session.js").Session) => Promise<void> }} options
@@ -366,8 +382,10 @@ async function answer(exchange, handler, generation) {
 async function reply(exchange, response, controller, stopped, abort) {
   const signal = controller.signal;
   const reader = response.body?.getReader();
+  let cancelling;
   const cancel = () => {
-    reader?.cancel(signal.reason).catch(() => {});
+    cancelling ??= reader?.cancel(signal.reason);
+    cancelling?.catch(() => {});
     abort().catch(() => {});
   };
   signal.addEventListener("abort", cancel, { once: true });
@@ -387,6 +405,7 @@ async function reply(exchange, response, controller, stopped, abort) {
     if (!signal.aborted) controller.abort(error);
   } finally {
     signal.removeEventListener("abort", cancel);
+    try { await cancelling; } catch { /* Cancellation failure still releases ownership. */ }
     reader?.releaseLock();
   }
 }
